@@ -1,0 +1,69 @@
+:root {
+  --bg: #0a0514;
+  --accent: #c64bff;
+  --accent2: #ff4fd8;
+  --accent3: #4ff0ff;
+  --fg: #f4f4ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(ellipse at top, rgba(198,75,255,0.18), transparent 55%),
+    radial-gradient(ellipse at bottom, rgba(255,79,216,0.12), transparent 55%),
+    var(--bg);
+}
+
+#game {
+  max-width: 95vw;
+  max-height: 85vh;
+  background: #120826;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 0 80px rgba(198, 75, 255, 0.55);
+  image-rendering: pixelated;
+}
+
+#hud {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  font-size: 0.95rem;
+  text-shadow: 0 0 10px var(--accent);
+  z-index: 10;
+  pointer-events: none;
+}
+
+#username {
+  font-weight: bold;
+  color: var(--accent2);
+  font-size: 1.1rem;
+}
+
+#peers {
+  font-size: 0.8rem;
+  color: var(--accent3);
+  text-shadow: 0 0 8px var(--accent3);
+  margin-top: 0.15rem;
+  letter-spacing: 0.02em;
+}
+
+#hint {
+  opacity: 0.65;
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
+}
