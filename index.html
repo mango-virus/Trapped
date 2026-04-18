@@ -3,16 +3,223 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>My Ordinary Game Jam Game</title>
+<title>Trapped — Labyrinth of Horrors</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<div id="hud">
-  <div id="username">loading…</div>
-  <div id="peers">1 online</div>
-  <div id="hint">WASD / arrows to move — walk into a portal to travel</div>
+
+<!-- ============ START MENU ============ -->
+<div id="menu" class="screen">
+  <div class="menu-inner">
+    <h1 class="title">TRAPPED</h1>
+    <p class="subtitle">Labyrinth of Horrors</p>
+
+    <div class="menu-buttons">
+      <button class="btn primary" id="btn-queue">Queue Into Game</button>
+      <button class="btn" id="btn-howto">How to Play</button>
+      <button class="btn" id="btn-leaderboard">Leaderboard</button>
+      <button class="btn" id="btn-settings">Settings</button>
+    </div>
+
+    <div class="menu-footer">
+      <label>Name: <input id="nameInput" maxlength="16" placeholder="guest"/></label>
+    </div>
+  </div>
 </div>
-<canvas id="game" width="960" height="540"></canvas>
+
+<!-- ============ HOW TO PLAY ============ -->
+<div id="howto" class="screen hidden">
+  <div class="menu-inner scrollable">
+    <h2>How to Play</h2>
+    <p>You are trapped inside a shifting labyrinth. Find the <b>key</b> and escape through the <b>exit door</b> on every level. Monsters hunt you. Traps kill you. You only get one life per run.</p>
+
+    <h3>Controls</h3>
+    <table class="controls">
+      <tr><td>WASD</td><td>Move</td></tr>
+      <tr><td>Mouse</td><td>Look</td></tr>
+      <tr><td>Shift</td><td>Sprint (uses stamina)</td></tr>
+      <tr><td>Space</td><td>Jump</td></tr>
+      <tr><td>C (hold)</td><td>Crouch — quieter but slower</td></tr>
+      <tr><td>E</td><td>Interact (pick up, open doors)</td></tr>
+      <tr><td>Left Click</td><td>Use selected item</td></tr>
+      <tr><td>1–5 / Scroll</td><td>Select inventory slot</td></tr>
+      <tr><td>Z</td><td>Drop selected item</td></tr>
+      <tr><td>F</td><td>Toggle flashlight</td></tr>
+      <tr><td>Esc</td><td>Release mouse</td></tr>
+    </table>
+
+    <h3>Rules</h3>
+    <ul>
+      <li>You start with <b>100 HP</b>, a <b>flashlight</b> (slot 1) with limited battery, and max 5 items.</li>
+      <li>Pick up batteries to recharge your flashlight. A reserve battery is kept if yours is already full.</li>
+      <li>Med packs heal. Use them by left-clicking while selected.</li>
+      <li>First player to escape a level gets the best pick of 3 <b>buffs / items</b>. Later escapees get lesser options — sometimes with a debuff attached.</li>
+      <li>Dead players become <b>monsters</b> on the next level — hunt the living.</li>
+      <li>Deeper levels spawn more monsters, more traps, and new themes.</li>
+    </ul>
+
+    <button class="btn" id="btn-back1">Back</button>
+  </div>
+</div>
+
+<!-- ============ LEADERBOARD ============ -->
+<div id="leaderboard" class="screen hidden">
+  <div class="menu-inner">
+    <h2>Leaderboard — Deepest Descent</h2>
+    <ol id="lbList" class="lb-list"><li class="lb-empty">no runs yet</li></ol>
+    <button class="btn" id="btn-back2">Back</button>
+  </div>
+</div>
+
+<!-- ============ SETTINGS ============ -->
+<div id="settings" class="screen hidden">
+  <div class="menu-inner">
+    <h2>Settings</h2>
+    <p class="muted">Audio volume levels</p>
+    <div class="settings-grid">
+      <label><span>Master</span><input type="range" id="vol-master" min="0" max="1" step="0.01"/><span class="val" id="val-master"></span></label>
+      <label><span>Ambient</span><input type="range" id="vol-ambient" min="0" max="1" step="0.01"/><span class="val" id="val-ambient"></span></label>
+      <label><span>SFX</span><input type="range" id="vol-sfx" min="0" max="1" step="0.01"/><span class="val" id="val-sfx"></span></label>
+      <label><span>Footsteps</span><input type="range" id="vol-footsteps" min="0" max="1" step="0.01"/><span class="val" id="val-footsteps"></span></label>
+      <label><span>Monsters</span><input type="range" id="vol-monsters" min="0" max="1" step="0.01"/><span class="val" id="val-monsters"></span></label>
+    </div>
+    <div class="settings-actions">
+      <button class="btn" id="btn-settings-reset">Reset to defaults</button>
+      <button class="btn primary" id="btn-settings-back">Back</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ LOBBY ============ -->
+<div id="lobby" class="screen hidden">
+  <div class="menu-inner">
+    <h2>Lobby</h2>
+    <p class="muted">The game begins when all players mark themselves ready.</p>
+    <ul id="lobbyList" class="lobby-list"></ul>
+    <div class="menu-buttons">
+      <button class="btn primary" id="btn-ready">I'm Ready</button>
+      <button class="btn" id="btn-leave">Leave</button>
+    </div>
+    <p id="lobbyStatus" class="muted small"></p>
+  </div>
+</div>
+
+<!-- ============ CHOICE OVERLAY (buffs/items after exit) ============ -->
+<div id="choice" class="screen hidden">
+  <div class="menu-inner">
+    <h2 id="choiceTitle">Choose Your Reward</h2>
+    <p id="choiceSubtitle" class="muted"></p>
+    <div id="choiceOptions" class="choice-grid"></div>
+  </div>
+</div>
+
+<!-- ============ PAUSE MENU ============ -->
+<div id="pause" class="screen hidden">
+  <div class="menu-inner">
+    <h2>Paused</h2>
+    <p class="muted small">[Esc] to resume</p>
+    <div class="menu-buttons">
+      <button class="btn primary" id="btn-resume">Resume</button>
+      <button class="btn" id="btn-pause-settings">Settings</button>
+      <button class="btn" id="btn-pause-howto">How to Play</button>
+      <button class="btn" id="btn-pause-leave">Leave to Menu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ DEATH OVERLAY ============ -->
+<div id="death" class="screen hidden">
+  <div class="menu-inner">
+    <h2 class="blood">YOU DIED</h2>
+    <p class="muted">Your corpse remains. You'll return as a monster on the next level.</p>
+    <p id="deathInfo" class="muted small"></p>
+  </div>
+</div>
+
+<!-- ============ END OVERLAY ============ -->
+<div id="endscreen" class="screen hidden">
+  <div class="menu-inner">
+    <h2>All players have fallen.</h2>
+    <p id="endInfo" class="muted"></p>
+    <button class="btn primary" id="btn-endback">Return to Menu</button>
+  </div>
+</div>
+
+<!-- ============ HUD (shown during gameplay) ============ -->
+<div id="hud" class="hidden">
+  <div class="hud-top">
+    <div id="levelIndicator">Level 1</div>
+    <div id="peerStatus">solo</div>
+  </div>
+
+  <div id="crosshair">+</div>
+
+  <div id="popup"></div>
+  <div id="interactHint" class="hidden">[E] interact</div>
+
+  <div class="hud-bottom">
+    <div class="bars">
+      <div class="bar hp"><div class="bar-fill" id="hpFill"></div><span id="hpText">100 / 100</span></div>
+      <div class="bar stam"><div class="bar-fill" id="stamFill"></div><span id="stamText">Stamina</span></div>
+      <div class="bar flash"><div class="bar-fill" id="flashFill"></div><span id="flashText">Flashlight</span></div>
+    </div>
+    <div id="inventory" class="inventory"></div>
+  </div>
+
+  <div id="keyIcon" class="hidden">🔑 KEY</div>
+
+  <!-- Compass (key sense / exit sense) -->
+  <div id="compass" class="hidden">
+    <div id="compassKey" class="compass-arrow hidden"><span class="arr">▲</span><span class="lbl">KEY</span></div>
+    <div id="compassExit" class="compass-arrow hidden"><span class="arr">▲</span><span class="lbl">EXIT</span></div>
+  </div>
+
+  <!-- Sonar pulse overlay (echo buff) -->
+  <div id="sonarPulse"></div>
+
+  <!-- Night vision overlay -->
+  <div id="nightVis"></div>
+
+  <!-- Buff / debuff status strip -->
+  <div id="statusStrip"></div>
+
+  <!-- X-ray outlines layer handled in WebGL; no DOM needed -->
+</div>
+
+<!-- ============ DAMAGE VIGNETTE + BLEED + PHOBIA VIGNETTES ============ -->
+<div id="damageVignette"></div>
+<div id="bleedVignette"></div>
+<div id="phobiaVignette"></div>
+<div id="bloodDrips"></div>
+
+<!-- ============ TUTORIAL OVERLAY ============ -->
+<div id="tutorial" class="hidden">
+  <div class="tut-card">
+    <h3>Welcome to the Labyrinth</h3>
+    <ul>
+      <li><b>WASD</b> move · <b>Shift</b> sprint · <b>Space</b> jump · <b>C</b> crouch</li>
+      <li><b>F</b> flashlight · <b>Mouse</b> look · <b>Left click</b> use item</li>
+      <li><b>E</b> pick up / open · <b>1–5 or Wheel</b> select · <b>Z</b> drop</li>
+      <li>Find the <b>key</b>, unlock the <b>exit</b>, pick a reward, walk through the <b>descend door</b>.</li>
+    </ul>
+    <p class="muted small">Click to dismiss</p>
+  </div>
+</div>
+
+<!-- ============ TEAMMATE LIST ============ -->
+<div id="teamList"></div>
+
+<!-- ============ GAME CANVAS ============ -->
+<canvas id="game"></canvas>
+
+<!-- Three.js (r160 via esm) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
 <script src="portal.js"></script>
 <script type="module" src="game.js"></script>
 </body>

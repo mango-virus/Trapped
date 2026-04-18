@@ -3,6 +3,7 @@ Thumbs.db
 node_modules/
 .vscode/
 .idea/
+.claude/
 *.log
 dist/
 build/
