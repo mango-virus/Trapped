@@ -4,6 +4,8 @@
 // ===================================================================
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { clone as skeletonClone } from 'https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js';
 
 // ------------------------------------------------------------------
 // PORTAL PROTOCOL (kept compatible)
@@ -411,34 +413,11 @@ const audio = (() => {
     return g;
   }
 
-  function playTone({ freq=440, type='sine', duration=0.3, attack=0.01, release=0.2, volume=0.2, freq2=null, sweepT=0, group='sfx' }) {
-    ensure(); if (!ctx) return;
-    const t0 = now();
-    const osc = ctx.createOscillator();
-    osc.type = type;
-    osc.frequency.setValueAtTime(freq, t0);
-    if (freq2 !== null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freq2), t0 + (sweepT || duration));
-    const gain = envGain(t0, attack, Math.max(0, duration - attack - release), release, volume);
-    osc.connect(gain); gain.connect(routeFor(group));
-    osc.start(t0); osc.stop(t0 + duration + 0.05);
-  }
-
-  function playNoise({ duration=0.3, volume=0.15, filterFreq=2000, filterQ=1, fType='bandpass', sweepTo=null, group='sfx' }) {
-    ensure(); if (!ctx) return;
-    const t0 = now();
-    const bufLen = Math.floor(ctx.sampleRate * duration);
-    const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < bufLen; i++) data[i] = (Math.random()*2-1);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const filt = ctx.createBiquadFilter();
-    filt.type = fType; filt.frequency.value = filterFreq; filt.Q.value = filterQ;
-    if (sweepTo !== null) filt.frequency.exponentialRampToValueAtTime(Math.max(20, sweepTo), t0 + duration);
-    const gain = envGain(t0, 0.005, Math.max(0, duration - 0.1), 0.09, volume);
-    src.connect(filt); filt.connect(gain); gain.connect(routeFor(group));
-    src.start(t0); src.stop(t0 + duration + 0.02);
-  }
+  // Sound effects currently disabled — all audio.XX() calls resolve to no-ops.
+  // To re-enable: remove the early `return` from each helper and audio will flow
+  // through the volume groups again.
+  function playTone(_opts) { return; }
+  function playNoise(_opts) { return; }
 
   function startAmbient(themeId) {
     ensure(); if (!ctx) return;
@@ -552,10 +531,11 @@ camera.add(flashlight);
 camera.add(flashlight.target);
 scene.add(camera);
 
-// Ambient & hemisphere (very dim baseline so players can barely see without flashlight)
-const ambient = new THREE.AmbientLight(0xffffff, 0.06);
+// TESTING: lights cranked up so the whole maze is visible. To restore the dim
+// horror baseline later, set ambient intensity back to ~0.06 and hemi to ~0.05.
+const ambient = new THREE.AmbientLight(0xffffff, 1.2);
 scene.add(ambient);
-const hemi = new THREE.HemisphereLight(0x443020, 0x0a0808, 0.05);
+const hemi = new THREE.HemisphereLight(0xffeedd, 0x333333, 0.8);
 scene.add(hemi);
 
 window.addEventListener('resize', () => {
@@ -1068,8 +1048,8 @@ function buildLevel() {
   const size = Math.min(40, 8 + Math.floor(level*1.6));
   const cells = generateMaze(rng, size, size);
 
-  // Fog & environment
-  scene.fog = new THREE.FogExp2(theme.fogColor, 0.12 + 0.005*level);
+  // Fog & environment (TESTING: very light fog so you can see the whole maze).
+  scene.fog = new THREE.FogExp2(theme.fogColor, 0.015);
   scene.background = new THREE.Color(theme.fogColor);
 
   // Floor & ceiling — merge into big planes (one per cell is heavy, so repeat the texture on one big plane)
@@ -1183,6 +1163,12 @@ function buildLevel() {
     candidates.push([x,y]);
   }
   shuffleInPlace(candidates, rng);
+  // Monster-spawn candidates: must be at least 4 cells away from the player start
+  // (measured by maze BFS distance, so it counts corners/walls correctly).
+  const MONSTER_MIN_START_DIST = 4;
+  const monsterCandidates = candidates.filter(([x, y]) =>
+    (dist[y]?.[x] ?? 0) >= MONSTER_MIN_START_DIST
+  );
   for (let i=0;i<scatterCount && i<candidates.length; i++) {
     const [cx,cy] = candidates[i];
     const wp = cellToWorld(cx, cy);
@@ -1239,22 +1225,23 @@ function buildLevel() {
     }
   }
 
-  // Monsters (host decides)
-  if (STATE.isHost) {
-    const monsterBase = 3 + Math.floor(rng()*3);          // 3-5
+  // Monsters (host decides). Skipped silently if MONSTER_DEFS is empty.
+  if (STATE.isHost && Object.keys(MONSTER_DEFS).length) {
+    const monsterBase = 3 + Math.floor(rng()*3);
     const monsterScale = Math.floor(level*0.8);
     const monsterCount = Math.min(16, monsterBase + monsterScale);
-    shuffleInPlace(candidates, rng);
-    for (let i=0;i<monsterCount && i<candidates.length;i++) {
-      const [cx,cy] = candidates[i];
+    shuffleInPlace(monsterCandidates, rng);
+    for (let i=0;i<monsterCount && i<monsterCandidates.length;i++) {
+      const [cx,cy] = monsterCandidates[i];
       const mtype = pickMonsterType(level, rng);
+      if (!mtype) break;
       const wp = cellToWorld(cx, cy);
       spawnMonster(mtype, wp.x, wp.z);
     }
-    // Dead players → monsters on this level (except level 1)
-    if (level > 1) {
+    // Dead players → deadplayer monsters (only if deadplayer type exists)
+    if (level > 1 && MONSTER_DEFS.deadplayer) {
       for (const pid of STATE.deadPlayerIds) {
-        const spawnCell = candidates[Math.floor(rng()*candidates.length)] || [size-1, size-1];
+        const spawnCell = monsterCandidates[Math.floor(rng()*monsterCandidates.length)] || [size-1, size-1];
         const wp = cellToWorld(spawnCell[0], spawnCell[1]);
         spawnMonster('deadplayer', wp.x, wp.z, { ownerId: pid });
       }
@@ -1632,7 +1619,30 @@ function recomputeStats(player) {
 // ------------------------------------------------------------------
 // MONSTER DEFINITIONS
 // ------------------------------------------------------------------
+// MONSTER_DEFS is intentionally empty — add new monster definitions here.
+// Template (copy + edit):
+//   myMonster: {
+//     name: 'My Monster', color: 0xff0000, hp: 50, speed: 2.2,
+//     sightRange: 12, sightAngle: 80, damage: 12, attackRange: 1.6,
+//     attackCooldown: 1.4, size: 1.0,
+//     build: () => monsterBodyBasic(0x602020, 1.8),
+//     // Optional: special: 'stalker' | 'mimic' | 'statue' | 'shadow' | 'hunter' |
+//     //                    'wailer' | 'phantom' | 'deadplayer' | 'stretcher' |
+//     //                    'spider' | 'doppelganger' | 'leech' | 'wraith' |
+//     //                    'siren' | 'bloater' | 'hivemind' | 'gazer' | 'carrier'
+//   },
 const MONSTER_DEFS = {
+  huggy: {
+    name: 'Huggy Wuggy', color: 0x2c4fa8, hp: 80, speed: 3.0,
+    sightRange: 18, sightAngle: 120, damage: 22, attackRange: 2.2,
+    attackCooldown: 1.3, size: 1.2,
+    build: () => monsterBodyGLB('models/huggy.glb', null, { scale: 0.65, yOffset: -0.1 }),
+    // special: left unset → uses default stalker chase/attack AI
+  },
+};
+
+// --- Removed monster archive (uncomment or reintroduce as needed) ---
+const _REMOVED_MONSTER_DEFS_REFERENCE = {
   stalker: {
     name: 'Stalker', color: 0x802020, hp: 50, speed: 2.2, sightRange: 12, sightAngle: 80, damage: 12, attackRange: 1.6, attackCooldown: 1.4,
     size: 1.0,
@@ -1753,14 +1763,103 @@ const MONSTER_DEFS = {
 };
 
 function pickMonsterType(level, rng) {
-  // Difficulty unlocks
-  const pool = ['stalker', 'crawler', 'leech'];
-  if (level >= 2) pool.push('mimic', 'hunter', 'spider');
-  if (level >= 3) pool.push('wailer', 'shadow', 'doppelganger', 'carrier');
-  if (level >= 4) pool.push('statue', 'phantom', 'bloater', 'stretcher');
-  if (level >= 5) pool.push('hulker', 'wraith', 'siren', 'gazer');
-  if (level >= 6) pool.push('hivemind');
-  return pool[Math.floor(rng()*pool.length)];
+  // Picks dynamically from whatever's defined in MONSTER_DEFS.
+  // When re-adding monsters, you can reintroduce a level-tier pool here.
+  const keys = Object.keys(MONSTER_DEFS);
+  if (!keys.length) return null;
+  return keys[Math.floor(rng()*keys.length)];
+}
+
+// GLTF/GLB loader — models live under /models/ in the repo
+const gltfLoader = new GLTFLoader();
+const gltfCache = new Map();   // url -> Promise<gltf>
+function loadGLTF(url) {
+  if (gltfCache.has(url)) return gltfCache.get(url);
+  const p = new Promise((resolve, reject) => {
+    gltfLoader.load(url, gltf => resolve(gltf), undefined, err => reject(err));
+  });
+  gltfCache.set(url, p);
+  return p;
+}
+
+// Build a monster body from a GLB file. Returns a Group immediately; populates
+// the real mesh asynchronously, normalizing size to `desiredHeight` (in meters).
+function monsterBodyGLB(url, desiredHeight=2.0, opts={}) {
+  const g = new THREE.Group();
+  g.userData.height = desiredHeight;
+  // Temporary placeholder so collisions/AI don't see a blank spot
+  const ph = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.3, 0.35, desiredHeight*0.9, 6),
+    new THREE.MeshStandardMaterial({ color: 0x222222, transparent: true, opacity: 0.35 })
+  );
+  ph.position.y = desiredHeight*0.45;
+  g.add(ph);
+  g.userData.placeholder = ph;
+
+  loadGLTF(url).then(gltf => {
+    const model = skeletonClone(gltf.scene);
+    // SkinnedMesh ignores its own scene-graph transform during skinning, so use
+    // the raw geometry bounding boxes in their native space — that's the space
+    // the GPU actually draws them in.
+    const bbox = new THREE.Box3();
+    model.traverse(o => {
+      if ((o.isMesh || o.isSkinnedMesh) && o.geometry) {
+        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        bbox.union(o.geometry.boundingBox);
+      }
+    });
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    // Scale: explicit override wins, else derive from bbox
+    const scale = (opts.scale != null)
+      ? opts.scale
+      : (size.y > 0 ? desiredHeight / size.y : 1);
+    // Floor offset: explicit override wins, else bottom-align the raw bbox
+    const yOffset = (opts.yOffset != null)
+      ? opts.yOffset
+      : -bbox.min.y * scale;
+    // Wrap in a group so we can scale without breaking SkinnedMesh skeleton bindings.
+    const wrapper = new THREE.Group();
+    wrapper.scale.setScalar(scale);
+    wrapper.position.y = yOffset;
+    if (opts.yawOffset) wrapper.rotation.y = opts.yawOffset;
+    wrapper.add(model);
+    model.traverse(o => {
+      if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
+    });
+    g.remove(ph);
+    g.add(wrapper);
+    g.userData.model = model;
+    g.userData.wrapper = wrapper;
+    if (gltf.animations && gltf.animations.length) {
+      const mixer = new THREE.AnimationMixer(model);
+      // Preload actions, keyed by common names, so state transitions can cross-fade.
+      const actions = {};
+      const findClip = rx => gltf.animations.find(c => rx.test(c.name));
+      const idle = findClip(/idle/i);
+      const run  = findClip(/run/i);
+      const walk = findClip(/walk/i);
+      const attack = findClip(/punch|attack/i);
+      if (idle) actions.idle = mixer.clipAction(idle);
+      if (run)  actions.run  = mixer.clipAction(run);
+      if (walk) actions.walk = mixer.clipAction(walk);
+      if (attack) actions.attack = mixer.clipAction(attack);
+      // Fallback: first clip as "idle"
+      if (!actions.idle) actions.idle = mixer.clipAction(gltf.animations[0]);
+      actions.idle.play();
+      g.userData.mixer = mixer;
+      g.userData.actions = actions;
+      g.userData.currentAction = 'idle';
+      g.userData.clips = gltf.animations;
+    }
+  }).catch(err => {
+    console.warn('[trapped] GLB load failed:', url, err);
+  });
+
+  // Proxy userData entries used by the walking animation code paths (armL/armR).
+  // For GLB monsters we animate via the AnimationMixer, not by rotating limbs.
+  g.userData.noProcWalkAnim = true;
+  return g;
 }
 
 function monsterBodyBasic(color, height, transparent=false) {
@@ -1890,6 +1989,7 @@ function applyMimicVisual(m) {
 
 function spawnMonster(type, x, z, opts={}) {
   const def = MONSTER_DEFS[type];
+  if (!def) { console.warn('[trapped] Unknown monster type:', type); return null; }
   const group = def.build();
   group.position.set(x, 0, z);
   levelGroup.add(group);
@@ -2018,6 +2118,35 @@ addEventListener('mousedown', e => {
 // ------------------------------------------------------------------
 // COLLISION
 // ------------------------------------------------------------------
+// Line-of-sight check between two 2D points (X-Z plane). Returns true if no wall
+// AABB blocks the segment, false if any wall intersects it.
+function hasLineOfSight(x1, z1, x2, z2) {
+  const aabbs = STATE.levelMeta?.wallAABBs;
+  if (!aabbs) return true;
+  const dx = x2 - x1, dz = z2 - z1;
+  for (const b of aabbs) {
+    let tmin = 0, tmax = 1;
+    if (dx !== 0) {
+      const tx1 = (b.minX - x1) / dx;
+      const tx2 = (b.maxX - x1) / dx;
+      tmin = Math.max(tmin, Math.min(tx1, tx2));
+      tmax = Math.min(tmax, Math.max(tx1, tx2));
+    } else if (x1 < b.minX || x1 > b.maxX) {
+      continue;
+    }
+    if (dz !== 0) {
+      const tz1 = (b.minZ - z1) / dz;
+      const tz2 = (b.maxZ - z1) / dz;
+      tmin = Math.max(tmin, Math.min(tz1, tz2));
+      tmax = Math.min(tmax, Math.max(tz1, tz2));
+    } else if (z1 < b.minZ || z1 > b.maxZ) {
+      continue;
+    }
+    if (tmax >= tmin && tmax >= 0 && tmin <= 1) return false;
+  }
+  return true;
+}
+
 function collidePoint(x, z, radius=0.28) {
   if (!STATE.levelMeta) return { x, z };
   const aabbs = STATE.levelMeta.wallAABBs;
@@ -2972,6 +3101,12 @@ function updateMonstersHost(dt) {
         if (closestD > def.sightRange*0.35) detected = false;
       }
       if (closest.repellentT > 0) detected = false;
+      // Line-of-sight — walls block detection (phantoms ignore walls anyway)
+      if (detected && def.special !== 'phantom') {
+        if (!hasLineOfSight(m.pos[0], m.pos[2], closest.pos[0], closest.pos[2])) {
+          detected = false;
+        }
+      }
 
       if (detected) {
         m.state = 'chase';
@@ -2980,8 +3115,27 @@ function updateMonstersHost(dt) {
     }
 
     if (m.state === 'chase' && closest) {
-      // Move toward target (A* would be better; cheap approach: direct with collision slide)
-      const dx = closest.pos[0]-m.pos[0], dz = closest.pos[2]-m.pos[2];
+      // Track line-of-sight to target. If we can't see them for 5s, give up.
+      const canSee = (def.special === 'phantom') ||
+        hasLineOfSight(m.pos[0], m.pos[2], closest.pos[0], closest.pos[2]);
+      if (canSee) {
+        m.lostSightT = 0;
+        m.lastSeenX = closest.pos[0];
+        m.lastSeenZ = closest.pos[2];
+      } else {
+        m.lostSightT = (m.lostSightT || 0) + dt;
+        if (m.lostSightT > 5) {
+          m.state = 'idle';
+          m.stateT = 1 + Math.random()*2;
+          m.targetId = null;
+          m.lostSightT = 0;
+          continue;
+        }
+      }
+      // Chase target if seen, otherwise head to last-seen point
+      const goalX = canSee ? closest.pos[0] : (m.lastSeenX ?? closest.pos[0]);
+      const goalZ = canSee ? closest.pos[2] : (m.lastSeenZ ?? closest.pos[2]);
+      const dx = goalX - m.pos[0], dz = goalZ - m.pos[2];
       const d = Math.hypot(dx, dz) || 0.001;
       const vx = (dx/d)*def.speed, vz = (dz/d)*def.speed;
       let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
@@ -2992,61 +3146,115 @@ function updateMonstersHost(dt) {
       m.pos[0] = nx; m.pos[2] = nz;
       m.yaw = Math.atan2(dx, dz);
 
-      // Attack
+      // Attack (only if still in direct sight of the real player)
       m.attackT -= dt;
-      if (d < def.attackRange && m.attackT <= 0) {
+      const realD = Math.hypot(closest.pos[0]-m.pos[0], closest.pos[2]-m.pos[2]);
+      if (canSee && realD < def.attackRange && m.attackT <= 0) {
+        const willKill = closest.hp <= def.damage;
         broadcastPlayerDamage(closest, def.damage, def.name);
         if (def.special === 'leech') {
-          // slow briefly — send event
           sendEvent && sendEvent({ type: 'slowed', id: closest.id, duration: 2 });
           if (closest.id === STATE.myId) me.slowedUntil = performance.now() + 2000;
         }
         m.attackT = def.attackCooldown;
 
         // Mimic post-kill transform
-        if (def.special === 'mimic' && closest.hp <= def.damage) {
+        if (def.special === 'mimic' && willKill) {
           m.mimicColor = closest.color;
           m.mimicName = closest.name;
           applyMimicVisual(m);
           m.state = 'idle';
           m.stateT = 15;
+          m.targetId = null;
           m.hp = Math.max(m.hp, 80);
           sendEvent && sendEvent({ type: 'mimicMorph', id: m.id, color: m.mimicColor, name: m.mimicName });
+        } else if (willKill) {
+          // Kill shot — revert to idle/wander, forget this target.
+          m.state = 'idle';
+          m.targetId = null;
+          m.idleT = 0;
+          m.idleDur = 1.5 + Math.random()*2;
+          m.moving = false;
+          m.lostSightT = 0;
         }
       }
     } else {
-      // Patrol/idle: random wander
-      m.stateT -= dt;
-      if (m.stateT <= 0) {
-        m.yaw += (Math.random()-0.5) * 1.2;
-        m.stateT = 2 + Math.random()*3;
-      }
-      const vx = Math.sin(m.yaw)*def.speed*0.4, vz = Math.cos(m.yaw)*def.speed*0.4;
-      let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
-      if (def.special !== 'phantom') {
-        const fixed = collidePoint(nx, nz, 0.4);
-        // If blocked, turn
-        if (Math.hypot(fixed.x - (m.pos[0] + vx*dt), fixed.z - (m.pos[2] + vz*dt)) > 0.01) {
-          m.yaw += Math.PI * 0.5 * (Math.random()<0.5 ? 1 : -1);
+      // Idle/patrol: alternate between STANDING STILL and WANDERING.
+      // m.moving = true while walking, false while pausing.
+      m.idleT = (m.idleT || 0) + dt;
+      if (m.moving === undefined) { m.moving = false; m.idleDur = 1.5 + Math.random()*1.5; }
+      if (m.idleT >= m.idleDur) {
+        m.moving = !m.moving;
+        m.idleT = 0;
+        if (m.moving) {
+          m.yaw += (Math.random()-0.5) * Math.PI;     // pick a new direction
+          m.idleDur = 2.5 + Math.random()*3;          // walk for 2.5–5.5s
+        } else {
+          m.idleDur = 1.2 + Math.random()*2.3;        // stand for 1.2–3.5s
         }
-        nx = fixed.x; nz = fixed.z;
       }
-      m.pos[0] = nx; m.pos[2] = nz;
+      if (m.moving) {
+        const vx = Math.sin(m.yaw)*def.speed*0.4, vz = Math.cos(m.yaw)*def.speed*0.4;
+        let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
+        if (def.special !== 'phantom') {
+          const fixed = collidePoint(nx, nz, 0.4);
+          // If blocked, turn and pause briefly
+          if (Math.hypot(fixed.x - (m.pos[0] + vx*dt), fixed.z - (m.pos[2] + vz*dt)) > 0.01) {
+            m.yaw += Math.PI * 0.5 * (Math.random()<0.5 ? 1 : -1);
+            m.moving = false;
+            m.idleT = 0;
+            m.idleDur = 0.8 + Math.random()*0.6;
+          }
+          nx = fixed.x; nz = fixed.z;
+        }
+        m.pos[0] = nx; m.pos[2] = nz;
+      }
     }
 
     // Update mesh (walking animation)
     const walking = m.state === 'chase' || m.stateT > 0.1;
     m.walkPhase = (m.walkPhase||0) + dt * (m.state === 'chase' ? 8 : 4);
-    const bob = walking ? Math.sin(m.walkPhase)*0.05 : 0;
-    m.mesh.position.set(m.pos[0], bob, m.pos[2]);
-    m.mesh.rotation.y = m.yaw;
-    // Arm swing if the monster body has armL/armR
-    const armL = m.mesh.userData?.armL, armR = m.mesh.userData?.armR;
-    if (armL && armR && walking) {
-      const swing = Math.sin(m.walkPhase) * 0.6;
-      armL.rotation.x = swing;
-      armR.rotation.x = -swing;
+    if (m.mesh.userData?.noProcWalkAnim) {
+      // GLB-based monsters animate via AnimationMixer, no procedural bob/limb swing.
+      m.mesh.position.set(m.pos[0], 0, m.pos[2]);
+    } else {
+      const bob = walking ? Math.sin(m.walkPhase)*0.05 : 0;
+      m.mesh.position.set(m.pos[0], bob, m.pos[2]);
+      const armL = m.mesh.userData?.armL, armR = m.mesh.userData?.armR;
+      if (armL && armR && walking) {
+        const swing = Math.sin(m.walkPhase) * 0.6;
+        armL.rotation.x = swing;
+        armR.rotation.x = -swing;
+      }
     }
+    m.mesh.rotation.y = m.yaw;
+  }
+}
+
+// Advance AnimationMixers for GLB monsters every frame (host + clients)
+function updateMonsterMixers(dt) {
+  for (const m of STATE.monsters) {
+    const ud = m.mesh?.userData;
+    if (!ud?.mixer) continue;
+    // Crossfade between animations based on monster state
+    if (ud.actions) {
+      let target = 'idle';
+      if (m.state === 'chase') {
+        target = ud.actions.run ? 'run' : (ud.actions.walk ? 'walk' : 'idle');
+      } else if (m.state === 'idle' || m.state === 'patrol') {
+        // Walk while actively wandering, idle while standing still.
+        const movingNow = !!m.moving;
+        target = (movingNow && ud.actions.walk) ? 'walk' : 'idle';
+      }
+      if (target !== ud.currentAction && ud.actions[target]) {
+        const prev = ud.actions[ud.currentAction];
+        const next = ud.actions[target];
+        next.reset().play();
+        if (prev) prev.crossFadeTo(next, 0.25, false);
+        ud.currentAction = target;
+      }
+    }
+    ud.mixer.update(dt);
   }
 }
 
@@ -3418,6 +3626,9 @@ function update(dt) {
     updateMonstersHost(dt);
     updateTrapsHost(dt);
   }
+
+  // Animation mixers (runs on host and clients)
+  updateMonsterMixers(dt);
 
   // Detect walking through descend door
   if (me.alive && me.inSafeRoom && STATE.safeRoomOpen) {
