@@ -261,9 +261,12 @@ async function initRoom() {
 
     updatePeerStatus();
     electHost();
+    checkAllReady();
   } catch (err) {
     console.warn('[mp] offline:', err);
     $('peerStatus').textContent = 'multiplayer offline — solo';
+    electHost();
+    checkAllReady();
   }
 }
 
@@ -337,6 +340,7 @@ function enterLobby() {
   STATE.phase = 'lobby';
   lobbyPlayers.clear();
   lobbyPlayers.set(STATE.myId, { name: STATE.username, ready: false });
+  electHost();
   initRoom();
   setTimeout(()=>{ broadcastLobbySelf(); renderLobby(); }, 500);
   showScreen('lobby');
@@ -545,43 +549,21 @@ window.addEventListener('resize', () => {
 });
 
 // ------------------------------------------------------------------
-// PROCEDURAL TEXTURES
+// THEME
 // ------------------------------------------------------------------
-const texCache = new Map();
-function makeNoiseCanvas(w, h, fn) {
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  const img = ctx.createImageData(w, h);
-  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
-    const i = (y*w + x)*4;
-    const [r,g,b,a] = fn(x,y);
-    img.data[i]=r; img.data[i+1]=g; img.data[i+2]=b; img.data[i+3]=a;
-  }
-  ctx.putImageData(img, 0, 0);
-  return c;
-}
-function smoothNoise(rng, w, h) {
-  const grid = new Float32Array(w*h);
-  for (let i=0;i<grid.length;i++) grid[i] = rng();
-  return (x,y) => {
-    const xi = Math.floor(x)%w, yi = Math.floor(y)%h;
-    return grid[((yi+h)%h)*w + (xi+w)%w];
+
+function buildTheme() {
+  const mat = (color, roughness = 0.95) => new THREE.MeshStandardMaterial({ color, roughness });
+  return {
+    id: 'labyrinth', name: 'The Labyrinth',
+    accentColor: 0xff4010, fogColor: 0x060406, lightColor: 0xffb060,
+    wallMat: mat(0x3a2e28),
+    floorMat: mat(0x1e1a14),
+    ceilMat:  mat(0x141210),
   };
 }
-function fractalNoise(rng, w, h) {
-  const layers = [smoothNoise(rng, 8, 8), smoothNoise(rng, 32, 32), smoothNoise(rng, 128, 128)];
-  const amps = [0.55, 0.3, 0.15];
-  return (x,y) => layers.reduce((s, l, i) => s + l(x,y)*amps[i], 0);
-}
 
-function buildTheme(themeId) {
-  const key = 'th_' + themeId;
-  if (texCache.has(key)) return texCache.get(key);
-  const rng = mulberry32(hashStr(themeId));
-  const size = 256;
-  let wallCanvas, floorCanvas, ceilCanvas, accentColor, fogColor, lightColor, themeName;
-
+function _deadCodeTheme_UNUSED(themeId) {
   if (themeId === 'hospital') {
     themeName = 'Modern Hospital';
     accentColor = 0xd0e8ff; fogColor = 0x1a2632; lightColor = 0xcfe6ff;
@@ -938,22 +920,7 @@ function buildTheme(themeId) {
   if (themeId === 'dungeon' || themeId === 'mine' || themeId === 'library' || themeId === 'meat') {
     wallMat.color = new THREE.Color(1.1, 1.0, 0.95);
   }
-
-  const theme = {
-    id: themeId, name: themeName,
-    wallMat, floorMat, ceilMat,
-    accentColor, fogColor, lightColor,
-    isKit: themeId === 'horror_hall',
-  };
-  texCache.set(key, theme);
-  return theme;
 }
-
-const THEMES = [
-  'hospital', 'dungeon', 'asylum', 'mine', 'meat', 'library', 'sewer', 'factory',
-  'cave', 'cathedral', 'prison', 'crypt', 'mansion', 'lab', 'subway', 'attic',
-  'horror_hall',
-];
 
 // ------------------------------------------------------------------
 // MAZE GENERATION (recursive backtracker, seeded)
@@ -1094,119 +1061,59 @@ function buildLevel() {
   clearLevel();
   const level = STATE.level;
   const rng = mulberry32(STATE.seed + level*7919);
-  // TESTING: always spawn horror_hall on level 1 so the kit is guaranteed to
-  // show up every run. Remove this override once the theme feels right.
-  const themeId = level === 1 ? 'horror_hall' : THEMES[Math.floor(rng()*THEMES.length)];
-  const theme = buildTheme(themeId);
+  const theme = buildTheme();
+  const themeId = theme.id;
   const size = Math.min(40, 8 + Math.floor(level*1.6));
   const cells = generateMaze(rng, size, size);
   // Carve out open rooms — breaks the long-corridor monotony.
   const rooms = carveRooms(cells, rng, size);
 
-  // Fog & environment (TESTING: very light fog so you can see the whole maze).
-  scene.fog = new THREE.FogExp2(theme.fogColor, 0.015);
+  scene.fog = new THREE.FogExp2(theme.fogColor, 0.05);
   scene.background = new THREE.Color(theme.fogColor);
 
-  // Only go kit-mode if the GLB has actually finished loading. Otherwise the
-  // level would build with invisible walls and floor. Fall back to procedural
-  // rendering in that case — next level to roll horror_hall will likely succeed.
-  const useKit = theme.isKit && kitPieces.Wall_02 && kitPieces.FloorTile;
-
   // Floor & ceiling
-  if (useKit) {
-    // Tile the floor with kit FloorTile pieces (2m each → 4 per game cell)
-    for (let y = -1; y <= size; y++) for (let x = -1; x <= size; x++) {
-      for (let sx = 0; sx < 2; sx++) for (let sy = 0; sy < 2; sy++) {
-        const piece = kitPiece('FloorTile');
-        if (!piece) continue;
-        piece.position.set(x*TILE + (sx-0.5)*2, 0, y*TILE + (sy-0.5)*2);
-        levelGroup.add(piece);
-      }
-    }
-    // Kit has no ceiling piece — use a dim plane matching the wall height.
-    const ceilMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1.0 });
-    const bigCeil = new THREE.Mesh(
-      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
-      ceilMat
-    );
-    bigCeil.rotation.x = Math.PI/2;
-    bigCeil.position.set(size*TILE/2 - TILE/2, WALL_H, size*TILE/2 - TILE/2);
-    bigCeil.receiveShadow = true;
-    levelGroup.add(bigCeil);
-  } else {
-    // Procedural tiled floor + ceiling
-    const bigFloor = new THREE.Mesh(
-      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
-      theme.floorMat.clone()
-    );
-    bigFloor.material.map = theme.floorMat.map.clone();
-    bigFloor.material.map.needsUpdate = true;
-    bigFloor.material.map.wrapS = bigFloor.material.map.wrapT = THREE.RepeatWrapping;
-    bigFloor.material.map.repeat.set(size+2, size+2);
-    bigFloor.rotation.x = -Math.PI/2;
-    bigFloor.position.set(size*TILE/2 - TILE/2, 0, size*TILE/2 - TILE/2);
-    bigFloor.receiveShadow = true;
-    levelGroup.add(bigFloor);
+  const span = size * TILE + 2 * TILE;
+  const cx0  = size * TILE / 2 - TILE / 2;
+  const bigFloor = new THREE.Mesh(new THREE.PlaneGeometry(span, span), theme.floorMat);
+  bigFloor.rotation.x = -Math.PI / 2;
+  bigFloor.position.set(cx0, 0, cx0);
+  bigFloor.receiveShadow = true;
+  levelGroup.add(bigFloor);
 
-    const bigCeil = new THREE.Mesh(
-      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
-      theme.ceilMat.clone()
-    );
-    bigCeil.material.map = theme.ceilMat.map.clone();
-    bigCeil.material.map.needsUpdate = true;
-    bigCeil.material.map.wrapS = bigCeil.material.map.wrapT = THREE.RepeatWrapping;
-    bigCeil.material.map.repeat.set(size+2, size+2);
-    bigCeil.rotation.x = Math.PI/2;
-    bigCeil.position.set(size*TILE/2 - TILE/2, WALL_H, size*TILE/2 - TILE/2);
-    bigCeil.receiveShadow = true;
-    levelGroup.add(bigCeil);
-  }
+  const bigCeil = new THREE.Mesh(new THREE.PlaneGeometry(span, span), theme.ceilMat);
+  bigCeil.rotation.x = Math.PI / 2;
+  bigCeil.position.set(cx0, WALL_H, cx0);
+  levelGroup.add(bigCeil);
 
-  // Walls — collect wall segments as AABBs for collision. addWall() dispatches
-  // to procedural BoxGeometry or to kit pieces depending on the theme.
+  // Walls — BoxGeometry segments, AABBs for collision
   const wallAABBs = [];
+  const wallGeom = new THREE.BoxGeometry(TILE, WALL_H, 0.3);
+
   function addWallAABB(x1, z1, x2, z2) {
-    const minX = Math.min(x1, x2) - 0.15;
-    const maxX = Math.max(x1, x2) + 0.15;
-    const minZ = Math.min(z1, z2) - 0.15;
-    const maxZ = Math.max(z1, z2) + 0.15;
-    wallAABBs.push({ minX, maxX, minZ, maxZ });
+    wallAABBs.push({
+      minX: Math.min(x1, x2) - 0.15, maxX: Math.max(x1, x2) + 0.15,
+      minZ: Math.min(z1, z2) - 0.15, maxZ: Math.max(z1, z2) + 0.15,
+    });
   }
   function addWall(x1, z1, x2, z2) {
-    if (useKit) {
-      // Two kit wall pieces along the 4m edge (each piece is 2m wide).
-      const mx = (x1+x2)/2, mz = (z1+z2)/2;
-      const dx = (x2-x1)/4, dz = (z2-z1)/4;  // quarter-length offset to each piece center
-      const angle = -Math.atan2(z2 - z1, x2 - x1);
-      for (const sign of [-1, 1]) {
-        const piece = kitPiece('Wall_02');
-        if (!piece) continue;
-        piece.position.set(mx + dx*sign, 0, mz + dz*sign);
-        piece.rotation.y = angle;
-        levelGroup.add(piece);
-      }
-    } else {
-      const len = Math.hypot(x2-x1, z2-z1);
-      const geom = new THREE.BoxGeometry(len, WALL_H, 0.3);
-      const m = new THREE.Mesh(geom, theme.wallMat);
-      const mx = (x1+x2)/2, mz = (z1+z2)/2;
-      m.position.set(mx, WALL_H/2, mz);
-      m.rotation.y = Math.atan2(z2-z1, x2-x1);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      levelGroup.add(m);
-    }
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const geom = len === TILE ? wallGeom : new THREE.BoxGeometry(len, WALL_H, 0.3);
+    const m = new THREE.Mesh(geom, theme.wallMat);
+    m.position.set((x1 + x2) / 2, WALL_H / 2, (z1 + z2) / 2);
+    m.rotation.y = Math.atan2(z2 - z1, x2 - x1);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    levelGroup.add(m);
     addWallAABB(x1, z1, x2, z2);
   }
 
-  for (let y=0;y<size;y++) for (let x=0;x<size;x++) {
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
     const c = cells[y][x];
-    const cx = x*TILE, cz = y*TILE;
-    const h = TILE/2;
-    if (c.walls.N) addWall(cx-h, cz-h, cx+h, cz-h);
-    if (c.walls.W) addWall(cx-h, cz-h, cx-h, cz+h);
-    if (y===size-1 && c.walls.S) addWall(cx-h, cz+h, cx+h, cz+h);
-    if (x===size-1 && c.walls.E) addWall(cx+h, cz-h, cx+h, cz+h);
+    const cx = x * TILE, cz = y * TILE, h = TILE / 2;
+    if (c.walls.N) addWall(cx - h, cz - h, cx + h, cz - h);
+    if (c.walls.W) addWall(cx - h, cz - h, cx - h, cz + h);
+    if (y === size - 1 && c.walls.S) addWall(cx - h, cz + h, cx + h, cz + h);
+    if (x === size - 1 && c.walls.E) addWall(cx + h, cz - h, cx + h, cz + h);
   }
 
   // Pick start (for spawn), key location (far from start), exit (further)
@@ -1336,18 +1243,12 @@ function buildLevel() {
   //   });
   // }
 
-  // Torches / flickering lights — scattered based on theme
-  const lightCount = Math.floor(size*size*0.04);
-  for (let i=0;i<lightCount;i++) {
-    const cx = Math.floor(rng()*size), cy = Math.floor(rng()*size);
-    const wp = cellToWorld(cx, cy);
-    if (theme.id === 'dungeon' || theme.id === 'mine' || theme.id === 'meat') {
-      spawnTorch(wp.x, wp.z, theme.lightColor, rng);
-    } else if (theme.id === 'hospital' || theme.id === 'asylum' || theme.id === 'factory') {
-      spawnFluorescent(wp.x, wp.z, theme.lightColor, rng);
-    } else {
-      spawnTorch(wp.x, wp.z, theme.lightColor, rng);
-    }
+  // Scattered torches
+  const lightCount = Math.floor(size * size * 0.05);
+  for (let i = 0; i < lightCount; i++) {
+    const lcx = Math.floor(rng() * size), lcy = Math.floor(rng() * size);
+    const wp = cellToWorld(lcx, lcy);
+    spawnTorch(wp.x, wp.z, theme.lightColor, rng);
   }
 
   // Monsters (host decides). Skipped silently if MONSTER_DEFS is empty.
@@ -1454,340 +1355,94 @@ const sharedGeoms = {
   trip: new THREE.CylinderGeometry(0.01, 0.01, TILE, 4),
 };
 
+// GLTF/GLB loader — models live under /models/ in the repo
+const gltfLoader = new GLTFLoader();
+const gltfCache = new Map();   // url -> Promise<gltf>
+
 // ------------------------------------------------------------------
-// PROPS — room dressing per theme
+// PROPS — GLB assets loaded from models/props/
 // ------------------------------------------------------------------
-// Each builder returns { mesh: THREE.Group, footprint: { w, d, h } }.
-// footprint.w and d are the XZ collision size (used to block movement),
-// h is just for visuals. If `nocollide: true`, prop is passable.
+// Each builder returns { mesh: THREE.Group, footprint: { w, d, h }, nocollide? }.
+// Footprint w/d are XZ collision extents. nocollide props are passable.
 
-const propMats = {
-  wood:      new THREE.MeshStandardMaterial({ color: 0x5a3a1a, roughness: 0.9 }),
-  darkWood:  new THREE.MeshStandardMaterial({ color: 0x3a2410, roughness: 0.95 }),
-  metal:     new THREE.MeshStandardMaterial({ color: 0x5a5a5a, roughness: 0.5, metalness: 0.6 }),
-  darkMetal: new THREE.MeshStandardMaterial({ color: 0x303030, roughness: 0.4, metalness: 0.8 }),
-  rust:      new THREE.MeshStandardMaterial({ color: 0x6a3018, roughness: 0.85, metalness: 0.3 }),
-  stone:     new THREE.MeshStandardMaterial({ color: 0x5e5e56, roughness: 0.95 }),
-  cloth:     new THREE.MeshStandardMaterial({ color: 0x402020, roughness: 0.95 }),
-  white:     new THREE.MeshStandardMaterial({ color: 0xd8d8d0, roughness: 0.6 }),
-  linen:     new THREE.MeshStandardMaterial({ color: 0xa8a090, roughness: 0.9 }),
-  bone:      new THREE.MeshStandardMaterial({ color: 0xd8cfa8, roughness: 0.8 }),
-  bookRed:   new THREE.MeshStandardMaterial({ color: 0x6a2020, roughness: 0.85 }),
-  bookBlue:  new THREE.MeshStandardMaterial({ color: 0x1e3a68, roughness: 0.85 }),
-  bookGreen: new THREE.MeshStandardMaterial({ color: 0x2a5a30, roughness: 0.85 }),
-};
+// GLB prop cache: populated at startup by loadPropGLBs()
+const propGLBs = {};
 
-function propAttach(g, ...children) { for (const c of children) g.add(c); return g; }
+(function loadPropGLBs() {
+  const defs = [
+    ['box1',       'models/props/box_01.glb'],
+    ['box2',       'models/props/box_02.glb'],
+    ['box3',       'models/props/box_03.glb'],
+    ['box4',       'models/props/box_04.glb'],
+    ['rack',       'models/props/metal_rack.glb'],
+    ['pallet',     'models/props/wood_pallet.glb'],
+    ['pipe',       'models/props/pvc_pipe.glb'],
+    ['bag',        'models/props/garbage_bag.glb'],
+    ['papers',     'models/props/papers.glb'],
+    ['sign',       'models/props/sign_rusty.glb'],
+    ['shovel',     'models/props/shovel.glb'],
+    ['rock1',      'models/props/rock1.glb'],
+    ['rock2',      'models/props/rock2.glb'],
+    ['rock3',      'models/props/rock3.glb'],
+    ['extinguisher','models/props/fire_extinguisher.glb'],
+    ['pump',       'models/props/pump_station.glb'],
+    ['wardrobe',   'models/props/wardrobe.glb'],
+    ['bench',      'models/props/bench.glb'],
+  ];
+  for (const [key, path] of defs) {
+    loadGLTF(path).then(gltf => {
+      gltf.scene.updateMatrixWorld(true);
+      propGLBs[key] = gltf.scene;
+    }).catch(() => {});
+  }
+})();
 
-// --- Generic (available to every theme) ---
-function propCrate() {
-  const g = new THREE.Group();
-  const box = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), propMats.wood);
-  box.position.y = 0.45; box.castShadow = true; box.receiveShadow = true;
-  // Slat lines on top for detail
-  const slat = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.02, 0.04), propMats.darkWood);
-  slat.position.set(0, 0.91, 0);
-  propAttach(g, box, slat);
-  return { mesh: g, footprint: { w: 0.95, d: 0.95, h: 0.9 } };
-}
-function propBarrel() {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.45, 1.0, 16), propMats.wood);
-  body.position.y = 0.5; body.castShadow = true; body.receiveShadow = true;
-  const ringGeom = new THREE.TorusGeometry(0.43, 0.025, 6, 16);
-  const ringTop = new THREE.Mesh(ringGeom, propMats.darkMetal);
-  ringTop.position.y = 0.85; ringTop.rotation.x = Math.PI/2;
-  const ringBot = ringTop.clone(); ringBot.position.y = 0.15;
-  propAttach(g, body, ringTop, ringBot);
-  return { mesh: g, footprint: { w: 0.95, d: 0.95, h: 1.0 } };
-}
-function propBench() {
-  const g = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.08, 0.5), propMats.wood);
-  seat.position.y = 0.5; seat.castShadow = true;
-  const legGeom = new THREE.BoxGeometry(0.08, 0.5, 0.45);
-  const leg1 = new THREE.Mesh(legGeom, propMats.darkWood); leg1.position.set(-0.8, 0.25, 0);
-  const leg2 = new THREE.Mesh(legGeom, propMats.darkWood); leg2.position.set(0.8, 0.25, 0);
-  propAttach(g, seat, leg1, leg2);
-  return { mesh: g, footprint: { w: 1.9, d: 0.6, h: 0.6 } };
-}
-function propChair() {
-  const g = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.5), propMats.wood);
-  seat.position.y = 0.45;
-  const back = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.06), propMats.wood);
-  back.position.set(0, 0.75, -0.22);
-  const legGeom = new THREE.BoxGeometry(0.06, 0.45, 0.06);
-  const positions = [[-0.2,0.22,-0.2],[0.2,0.22,-0.2],[-0.2,0.22,0.2],[0.2,0.22,0.2]];
-  for (const p of positions) {
-    const l = new THREE.Mesh(legGeom, propMats.darkWood);
-    l.position.set(...p); g.add(l);
-  }
-  propAttach(g, seat, back);
-  return { mesh: g, footprint: { w: 0.6, d: 0.6, h: 1.05 } };
-}
-function propDebris() {
-  const g = new THREE.Group();
-  const count = 4 + Math.floor(Math.random()*4);
-  for (let i = 0; i < count; i++) {
-    const sz = 0.15 + Math.random()*0.25;
-    const m = new THREE.Mesh(new THREE.BoxGeometry(sz, sz, sz), propMats.stone);
-    m.position.set((Math.random()-0.5)*0.8, sz/2 + Math.random()*0.1, (Math.random()-0.5)*0.8);
-    m.rotation.set(Math.random(), Math.random(), Math.random());
-    g.add(m);
-  }
-  return { mesh: g, footprint: { w: 0.9, d: 0.9, h: 0.4 }, nocollide: true };
-}
-function propCorpse() {
-  const g = new THREE.Group();
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), propMats.cloth);
-  torso.rotation.z = Math.PI/2; torso.position.set(0, 0.25, 0);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), propMats.linen);
-  head.position.set(0.6, 0.22, 0);
-  propAttach(g, torso, head);
-  return { mesh: g, footprint: { w: 1.5, d: 0.7, h: 0.5 }, nocollide: true };
-}
-
-// --- Theme-specific ---
-function propGurney() {
-  const g = new THREE.Group();
-  const top = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 0.7), propMats.white);
-  top.position.y = 0.9;
-  const sheet = new THREE.Mesh(new THREE.BoxGeometry(1.95, 0.02, 0.65), propMats.cloth);
-  sheet.position.y = 0.97;
-  const legGeom = new THREE.CylinderGeometry(0.03, 0.03, 0.85, 6);
-  const lp = [[-0.9,0.42,-0.3],[0.9,0.42,-0.3],[-0.9,0.42,0.3],[0.9,0.42,0.3]];
-  for (const p of lp) {
-    const l = new THREE.Mesh(legGeom, propMats.metal);
-    l.position.set(...p); g.add(l);
-  }
-  const wheelGeom = new THREE.TorusGeometry(0.08, 0.03, 6, 10);
-  for (const p of lp) {
-    const w = new THREE.Mesh(wheelGeom, propMats.darkMetal);
-    w.position.set(p[0], 0.08, p[2]); w.rotation.z = Math.PI/2; g.add(w);
-  }
-  propAttach(g, top, sheet);
-  return { mesh: g, footprint: { w: 2.1, d: 0.8, h: 1.0 } };
-}
-function propIVStand() {
-  const g = new THREE.Group();
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.8, 6), propMats.metal);
-  pole.position.y = 0.9;
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.04, 12), propMats.metal);
-  base.position.y = 0.02;
-  const bag = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.04), new THREE.MeshStandardMaterial({ color: 0xdf4040, roughness: 0.3, transparent: true, opacity: 0.9 }));
-  bag.position.set(0.08, 1.5, 0);
-  propAttach(g, pole, base, bag);
-  return { mesh: g, footprint: { w: 0.45, d: 0.45, h: 1.8 } };
-}
-function propWheelchair() {
-  const g = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.55), propMats.darkMetal);
-  seat.position.y = 0.5;
-  const back = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.06), propMats.darkMetal);
-  back.position.set(0, 0.85, -0.25);
-  const wheelGeom = new THREE.TorusGeometry(0.3, 0.04, 8, 16);
-  const wL = new THREE.Mesh(wheelGeom, propMats.darkMetal); wL.position.set(-0.35, 0.3, 0); wL.rotation.y = Math.PI/2;
-  const wR = new THREE.Mesh(wheelGeom, propMats.darkMetal); wR.position.set( 0.35, 0.3, 0); wR.rotation.y = Math.PI/2;
-  propAttach(g, seat, back, wL, wR);
-  return { mesh: g, footprint: { w: 0.8, d: 0.7, h: 1.2 } };
-}
-function propBookshelf() {
-  const g = new THREE.Group();
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.0, 0.4), propMats.darkWood);
-  frame.position.y = 1.0;
-  // Three shelves
-  for (let i = 0; i < 3; i++) {
-    const y = 0.4 + i*0.55;
-    // Books as a row of colored boxes
-    for (let j = 0; j < 6; j++) {
-      const col = [propMats.bookRed, propMats.bookBlue, propMats.bookGreen, propMats.darkWood][(j+i) % 4];
-      const bw = 0.15 + Math.random()*0.08;
-      const bh = 0.28 + Math.random()*0.15;
-      const book = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, 0.2), col);
-      book.position.set(-0.55 + j*0.2, y + bh/2, 0.1);
-      g.add(book);
-    }
-  }
-  propAttach(g, frame);
-  return { mesh: g, footprint: { w: 1.5, d: 0.5, h: 2.0 } };
-}
-function propReadingTable() {
-  const g = new THREE.Group();
-  const top = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.08, 0.8), propMats.wood);
-  top.position.y = 0.8;
-  const legGeom = new THREE.BoxGeometry(0.08, 0.75, 0.08);
-  const lp = [[-0.6,0.38,-0.35],[0.6,0.38,-0.35],[-0.6,0.38,0.35],[0.6,0.38,0.35]];
-  for (const p of lp) {
-    const l = new THREE.Mesh(legGeom, propMats.darkWood); l.position.set(...p); g.add(l);
-  }
-  // book on top
-  const book = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.05, 0.2), propMats.bookRed);
-  book.position.set(0.1, 0.87, 0);
-  propAttach(g, top, book);
-  return { mesh: g, footprint: { w: 1.4, d: 0.9, h: 0.85 } };
-}
-function propPew() {
-  const g = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 0.45), propMats.darkWood);
-  seat.position.y = 0.5;
-  const back = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 0.08), propMats.darkWood);
-  back.position.set(0, 0.9, -0.2);
-  const legGeom = new THREE.BoxGeometry(0.08, 0.5, 0.45);
-  const l1 = new THREE.Mesh(legGeom, propMats.darkWood); l1.position.set(-1.0, 0.25, 0);
-  const l2 = new THREE.Mesh(legGeom, propMats.darkWood); l2.position.set( 1.0, 0.25, 0);
-  propAttach(g, seat, back, l1, l2);
-  return { mesh: g, footprint: { w: 2.3, d: 0.55, h: 1.3 } };
-}
-function propAltar() {
-  const g = new THREE.Group();
-  const base = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.1, 0.8), propMats.stone);
-  base.position.y = 0.55;
-  const top = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.1, 0.9), propMats.stone);
-  top.position.y = 1.15;
-  const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 8), new THREE.MeshStandardMaterial({ color: 0xe8e0c0, emissive: 0xffc040, emissiveIntensity: 0.6 }));
-  candle.position.set(0, 1.32, 0);
-  propAttach(g, base, top, candle);
-  return { mesh: g, footprint: { w: 1.8, d: 1.0, h: 1.3 } };
-}
-function propCoffin() {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.4, 2.0), propMats.darkWood);
-  body.position.y = 0.2;
-  const lid = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.05, 2.05), propMats.darkWood);
-  lid.position.y = 0.42;
-  propAttach(g, body, lid);
-  return { mesh: g, footprint: { w: 1.1, d: 2.1, h: 0.45 } };
-}
-function propSkullPile() {
-  const g = new THREE.Group();
-  for (let i = 0; i < 5; i++) {
-    const sz = 0.12 + Math.random()*0.06;
-    const s = new THREE.Mesh(new THREE.SphereGeometry(sz, 8, 8), propMats.bone);
-    s.position.set((Math.random()-0.5)*0.8, sz, (Math.random()-0.5)*0.8);
-    g.add(s);
-  }
-  return { mesh: g, footprint: { w: 1.0, d: 1.0, h: 0.3 }, nocollide: true };
-}
-function propChains() {
-  const g = new THREE.Group();
-  const linkGeom = new THREE.TorusGeometry(0.05, 0.015, 4, 6);
-  for (let k = 0; k < 2; k++) {
-    const xOff = (k === 0 ? -0.3 : 0.3);
-    for (let i = 0; i < 8; i++) {
-      const link = new THREE.Mesh(linkGeom, propMats.darkMetal);
-      link.position.set(xOff, WALL_H - 0.2 - i*0.12, 0);
-      if (i % 2 === 0) link.rotation.y = Math.PI/2;
-      g.add(link);
-    }
-  }
-  return { mesh: g, footprint: { w: 0.8, d: 0.3, h: 1.2 }, nocollide: true };
-}
-function propPipe() {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 3.5, 12), propMats.rust);
-  body.rotation.z = Math.PI/2;
-  body.position.y = WALL_H - 0.6;
-  const flange1 = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.15, 12), propMats.darkMetal);
-  flange1.rotation.z = Math.PI/2; flange1.position.set(-1.6, WALL_H - 0.6, 0);
-  const flange2 = flange1.clone(); flange2.position.set(1.6, WALL_H - 0.6, 0);
-  propAttach(g, body, flange1, flange2);
-  return { mesh: g, footprint: { w: 3.6, d: 0.6, h: 0.6 }, nocollide: true };
-}
-function propGrate() {
-  const g = new THREE.Group();
-  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 1.2), propMats.darkMetal);
-  frame.position.y = 0.05;
-  // bars
-  for (let i = 0; i < 5; i++) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, 0.05), propMats.metal);
-    bar.position.set(0, 0.09, -0.5 + i*0.25); g.add(bar);
-  }
-  propAttach(g, frame);
-  return { mesh: g, footprint: { w: 1.3, d: 1.3, h: 0.1 }, nocollide: true };
-}
-function propTombstone() {
-  const g = new THREE.Group();
-  const base = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.15, 0.4), propMats.stone);
-  base.position.y = 0.075;
-  const stone = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.2), propMats.stone);
-  stone.position.y = 0.65;
-  propAttach(g, base, stone);
-  return { mesh: g, footprint: { w: 1.0, d: 0.5, h: 1.2 } };
-}
-function propMineCart() {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 0.7), propMats.darkWood);
-  body.position.y = 0.55;
-  const wheelGeom = new THREE.TorusGeometry(0.18, 0.04, 6, 12);
-  for (const x of [-0.5, 0.5]) for (const z of [-0.3, 0.3]) {
-    const w = new THREE.Mesh(wheelGeom, propMats.darkMetal);
-    w.position.set(x, 0.2, z); w.rotation.y = Math.PI/2; g.add(w);
-  }
-  propAttach(g, body);
-  return { mesh: g, footprint: { w: 1.3, d: 0.9, h: 0.9 } };
-}
-
-const PROP_POOL = {
-  generic:   [propCrate, propBarrel, propBench, propChair, propDebris, propCorpse],
-  hospital:  [propGurney, propIVStand, propWheelchair, propCorpse, propBench],
-  dungeon:   [propChains, propSkullPile, propBarrel, propCrate, propDebris, propCorpse],
-  asylum:    [propWheelchair, propChair, propBench, propCorpse, propDebris],
-  mine:      [propMineCart, propBarrel, propCrate, propDebris, propChains],
-  meat:      [propBarrel, propChains, propDebris, propCorpse],
-  library:   [propBookshelf, propReadingTable, propChair, propCorpse, propBench],
-  sewer:     [propPipe, propGrate, propBarrel, propCrate, propDebris],
-  factory:   [propCrate, propBarrel, propMineCart, propChains, propDebris],
-  cave:      [propDebris, propSkullPile, propBarrel, propCorpse],
-  cathedral: [propPew, propAltar, propTombstone, propBench, propCandelabra],
-  prison:    [propBench, propChair, propChains, propCorpse, propCrate],
-  crypt:     [propCoffin, propTombstone, propSkullPile, propCorpse, propDebris],
-  mansion:   [propChair, propReadingTable, propBookshelf, propBench, propCorpse],
-  lab:       [propGurney, propIVStand, propReadingTable, propChair, propCrate],
-  subway:    [propBench, propCrate, propBarrel, propDebris, propPipe],
-  attic:     [propCrate, propChair, propDebris, propCorpse, propBench],
-  horror_hall: [propKitCabinet, propKitMetalCabinet, propKitCabinetShort, propKitWoodBox, propKitCardboardBox, propCorpse],
-};
-
-// Kit-backed prop builders (used by the horror_hall theme). Each clones a
-// named piece out of horror_kit.glb. Falls back to a hidden placeholder if the
-// kit isn't loaded yet so spawnPropsInRooms can just skip it. Declared as
-// functions so they're hoisted before PROP_POOL references them.
-function _kitProp(name, footprint, nocollide=false) {
-  const mesh = kitPiece(name);
-  if (!mesh) {
-    return { mesh: new THREE.Group(), footprint: { w: 0.01, d: 0.01, h: 0.01 }, nocollide: true };
-  }
+function _glbProp(key, footprint, nocollide = false) {
+  const src = propGLBs[key];
+  if (!src) return { mesh: new THREE.Group(), footprint: { w: 0.01, d: 0.01, h: 0.01 }, nocollide: true };
+  const mesh = src.clone(true);
+  mesh.traverse(o => {
+    if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
+  });
   return { mesh, footprint, nocollide };
 }
-function propKitCabinet()       { return _kitProp('Cabinet',       { w: 0.8,  d: 1.7,  h: 3.5 }); }
-function propKitMetalCabinet()  { return _kitProp('Metal_Cabinet', { w: 0.7,  d: 1.7,  h: 2.7 }); }
-function propKitCabinetShort()  { return _kitProp('CabinetShort',  { w: 2.1,  d: 0.95, h: 1.4 }); }
-function propKitWoodBox()       { return _kitProp('Wood_Box',      { w: 0.75, d: 0.55, h: 0.9 }); }
-function propKitCardboardBox()  { return _kitProp('CarboardBox',   { w: 0.5,  d: 0.55, h: 0.8 }); }
-function propCandelabra() {
-  const g = new THREE.Group();
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 0.1, 8), propMats.darkMetal);
-  base.position.y = 0.05;
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.3, 6), propMats.darkMetal);
-  pole.position.y = 0.7;
-  const candleMat = new THREE.MeshStandardMaterial({ color: 0xe8e0c0, emissive: 0xffc040, emissiveIntensity: 0.7 });
-  for (let i = -1; i <= 1; i++) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.3), propMats.darkMetal);
-    arm.position.set(i*0.1, 1.25, 0.1);
-    const c = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.2, 6), candleMat);
-    c.position.set(i*0.2, 1.35, 0.2);
-    propAttach(g, arm, c);
-  }
-  propAttach(g, base, pole);
-  return { mesh: g, footprint: { w: 0.5, d: 0.5, h: 1.5 } };
-}
+
+function propBox1()        { return _glbProp('box1',        { w: 0.65, d: 0.65, h: 0.60 }); }
+function propBox2()        { return _glbProp('box2',        { w: 0.60, d: 0.50, h: 0.55 }); }
+function propBox3()        { return _glbProp('box3',        { w: 0.45, d: 0.45, h: 0.50 }); }
+function propBox4()        { return _glbProp('box4',        { w: 0.55, d: 0.55, h: 0.55 }); }
+function propRack()        { return _glbProp('rack',        { w: 1.10, d: 0.50, h: 2.00 }); }
+function propPallet()      { return _glbProp('pallet',      { w: 1.10, d: 1.10, h: 0.15 }); }
+function propPipe()        { return _glbProp('pipe',        { w: 1.50, d: 0.20, h: 0.20 }, true); }
+function propBag()         { return _glbProp('bag',         { w: 0.55, d: 0.55, h: 0.50 }, true); }
+function propPapers()      { return _glbProp('papers',      { w: 0.40, d: 0.30, h: 0.05 }, true); }
+function propSign()        { return _glbProp('sign',        { w: 0.40, d: 0.10, h: 0.60 }, true); }
+function propShovel()      { return _glbProp('shovel',      { w: 0.15, d: 0.15, h: 1.20 }, true); }
+function propRock1()       { return _glbProp('rock1',       { w: 0.70, d: 0.60, h: 0.50 }); }
+function propRock2()       { return _glbProp('rock2',       { w: 0.50, d: 0.50, h: 0.40 }); }
+function propRock3()       { return _glbProp('rock3',       { w: 0.55, d: 0.50, h: 0.45 }); }
+function propExtinguisher(){ return _glbProp('extinguisher',{ w: 0.30, d: 0.30, h: 1.00 }); }
+function propPump()        { return _glbProp('pump',        { w: 0.70, d: 0.50, h: 1.20 }); }
+function propWardrobe()    { return _glbProp('wardrobe',    { w: 0.90, d: 0.50, h: 2.00 }); }
+function propBench()       { return _glbProp('bench',       { w: 1.50, d: 0.50, h: 0.90 }); }
+
+const PROP_POOL = {
+  labyrinth: [
+    propBox1, propBox2, propBox3, propBox4,
+    propRack, propPallet, propPipe, propBag,
+    propPapers, propSign, propShovel,
+    propRock1, propRock2, propRock3,
+    propExtinguisher, propPump,
+    propWardrobe, propBench,
+  ],
+};
+
 
 // Spawn props in carved rooms. Adds visible meshes to levelGroup and (for
 // collidable props) pushes AABBs into wallAABBs for movement/line-of-sight.
 function spawnPropsInRooms(themeId, rooms, rng, wallAABBs, forbidden=[]) {
-  const pool = PROP_POOL[themeId] || PROP_POOL.generic;
-  const allProps = pool.concat(PROP_POOL.generic);
+  const pool = PROP_POOL[themeId] || PROP_POOL.labyrinth;
+  const allProps = pool;
   const isForbidden = (cx, cy) => forbidden.some(([fx, fy]) => fx === cx && fy === cy);
   for (const room of rooms) {
     const cellCount = room.w * room.h;
@@ -2282,9 +1937,6 @@ function pickMonsterType(level, rng) {
   return keys[Math.floor(rng()*keys.length)];
 }
 
-// GLTF/GLB loader — models live under /models/ in the repo
-const gltfLoader = new GLTFLoader();
-const gltfCache = new Map();   // url -> Promise<gltf>
 function loadGLTF(url) {
   if (gltfCache.has(url)) return gltfCache.get(url);
   const p = new Promise((resolve, reject) => {
@@ -2393,21 +2045,43 @@ let kitLoadPromise = null;
 
 function loadHorrorKit() {
   if (kitLoadPromise) return kitLoadPromise;
-  kitLoadPromise = loadGLTF('models/horror_kit.glb').then(gltf => {
-    const seen = new Set();
+  kitLoadPromise = loadGLTF('models/horror_floor_kit.glb').then(gltf => {
+    gltf.scene.updateMatrixWorld(true);
+    const AGGREGATES = new Set(['Sketchfab_Scene', 'Sketchfab_model', 'RootNode']);
+    const found = [];
     gltf.scene.traverse(o => {
       if (!o.name) return;
-      // Strip Blender's ".NNN" duplicate-name suffix ("Wall_02.037" -> "Wall_02")
-      const canonical = o.name.replace(/\.\d+$/, '');
-      if (seen.has(canonical)) return;
-      // Only pick mesh-owning nodes (groups that contain real geometry)
+      if (AGGREGATES.has(o.name)) return;
+      // three.js strips the dot from Blender names: "Wall_02.037" -> "Wall_02037"
+      // and ".fbx" -> "fbx" at end
+      if (/fbx$/i.test(o.name)) return;
+      // Skip if any ancestor is already a collected piece (children of a cached
+      // piece are its sub-meshes, not separate pieces).
+      let skip = false;
+      let p = o.parent;
+      while (p) {
+        if (found.some(f => f.node === p)) { skip = true; break; }
+        p = p.parent;
+      }
+      if (skip) return;
+      // Only nodes that actually contain geometry
       let hasMesh = false;
       o.traverse(c => { if (c.isMesh) hasMesh = true; });
       if (!hasMesh) return;
-      kitPieces[canonical] = o;
-      seen.add(canonical);
+      // Strip trailing 3-digit Blender version suffix ("Wall_02037" -> "Wall_02")
+      const canonical = o.name.replace(/\d{3}$/, '');
+      found.push({ node: o, canonical });
     });
-    console.log('[trapped] horror kit loaded:', Object.keys(kitPieces));
+    for (const { node, canonical } of found) {
+      if (kitPieces[canonical]) continue;
+      // Bake the world matrix from the original hierarchy into the local
+      // transform so each piece is self-contained when cloned.
+      node.matrix.copy(node.matrixWorld);
+      node.matrix.decompose(node.position, node.quaternion, node.scale);
+      node.matrixAutoUpdate = true;
+      kitPieces[canonical] = node;
+    }
+    console.log('[trapped] horror kit pieces:', Object.keys(kitPieces));
     return kitPieces;
   }).catch(err => {
     console.warn('[trapped] horror kit load failed:', err);
@@ -2416,20 +2090,25 @@ function loadHorrorKit() {
   return kitLoadPromise;
 }
 
-// Return a fresh clone of a kit piece, or null if the kit isn't loaded or the
-// piece name doesn't exist. Keeps shadows/materials intact.
+// Return a fresh wrapper-group around a cloned kit piece. The inner clone keeps
+// the baked orientation (e.g., the kit's Y-up conversion); the wrapper is what
+// the caller positions and rotates around world Y. Returns null if the piece
+// isn't loaded.
 function kitPiece(name) {
   const src = kitPieces[name];
   if (!src) return null;
-  const clone = src.clone(true);
-  clone.traverse(o => {
+  const inner = src.clone(true);
+  inner.position.set(0, 0, 0);
+  inner.traverse(o => {
     if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
   });
-  return clone;
+  const wrapper = new THREE.Group();
+  wrapper.add(inner);
+  return wrapper;
 }
 
 // Preload in the background so when a horror_hall level rolls, the kit is ready.
-loadHorrorKit();
+// loadHorrorKit(); // disabled — GLB kit not in use
 
 function monsterBodyBasic(color, height, transparent=false) {
   const g = new THREE.Group();
