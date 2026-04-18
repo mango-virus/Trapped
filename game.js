@@ -994,6 +994,45 @@ function generateMaze(rng, w, h) {
   return cells;
 }
 
+// Carve open rooms in the maze by knocking out interior walls of random rectangles.
+// Mutates cells. Returns a list of rooms: { x, y, w, h } in cell coordinates.
+function carveRooms(cells, rng, size) {
+  const rooms = [];
+  const attempts = Math.min(30, size * 2);
+  // Room count scales with maze size
+  const maxRooms = Math.max(2, Math.floor(size * size / 28));
+  for (let i = 0; i < attempts && rooms.length < maxRooms; i++) {
+    // 60% chance of 2x2, 30% of 2x3/3x2, 10% of 3x3
+    const r = rng();
+    let w, h;
+    if (r < 0.6) { w = 2; h = 2; }
+    else if (r < 0.9) { w = rng() < 0.5 ? 2 : 3; h = w === 2 ? 3 : 2; }
+    else { w = 3; h = 3; }
+    // Keep 1-cell buffer from edges so outer walls stay intact
+    const rx = 1 + Math.floor(rng() * (size - w - 1));
+    const ry = 1 + Math.floor(rng() * (size - h - 1));
+    // Don't overlap the player spawn cell or existing rooms
+    if (rx === 0 && ry === 0) continue;
+    if (rx <= 0 && ry <= 0) continue;
+    let overlap = false;
+    for (const rm of rooms) {
+      if (rx < rm.x + rm.w && rx + w > rm.x && ry < rm.y + rm.h && ry + h > rm.y) {
+        overlap = true; break;
+      }
+    }
+    if (overlap) continue;
+    // Knock out interior walls within the rectangle
+    for (let y = ry; y < ry + h; y++) {
+      for (let x = rx; x < rx + w; x++) {
+        if (x < rx + w - 1) { cells[y][x].walls.E = false; cells[y][x + 1].walls.W = false; }
+        if (y < ry + h - 1) { cells[y][x].walls.S = false; cells[y + 1][x].walls.N = false; }
+      }
+    }
+    rooms.push({ x: rx, y: ry, w, h });
+  }
+  return rooms;
+}
+
 function bfsDistance(cells, sx, sy) {
   const w = cells[0].length, h = cells.length;
   const dist = Array.from({length:h},()=>new Array(w).fill(-1));
@@ -1047,6 +1086,8 @@ function buildLevel() {
   const theme = buildTheme(themeId);
   const size = Math.min(40, 8 + Math.floor(level*1.6));
   const cells = generateMaze(rng, size, size);
+  // Carve out open rooms — breaks the long-corridor monotony.
+  const rooms = carveRooms(cells, rng, size);
 
   // Fog & environment (TESTING: very light fog so you can see the whole maze).
   scene.fog = new THREE.FogExp2(theme.fogColor, 0.015);
@@ -1122,6 +1163,33 @@ function buildLevel() {
     const s = Math.min(dist[y][x], distFromExit[y][x]);
     if (s > bestScore && !(x===0&&y===0) && !(x===exitCell[0]&&y===exitCell[1])) {
       bestScore = s; bestKey = [x,y];
+    }
+  }
+
+  // Scatter theme-appropriate props inside carved rooms. Skip cells that hold
+  // the player spawn, exit door, or key so movement to them is never blocked.
+  const forbidden = [[0, 0], [exitCell[0], exitCell[1]], [bestKey[0], bestKey[1]]];
+  spawnPropsInRooms(themeId, rooms, rng, wallAABBs, forbidden);
+
+  // Any room that didn't get props becomes a boring empty box — restore its
+  // interior walls so it blends back into the regular maze.
+  for (const room of rooms) {
+    if ((room.propCount || 0) > 0) continue;
+    for (let y = room.y; y < room.y + room.h; y++) {
+      for (let x = room.x; x < room.x + room.w; x++) {
+        if (x < room.x + room.w - 1) {
+          cells[y][x].walls.E = true;
+          cells[y][x+1].walls.W = true;
+          const wx = x*TILE + TILE/2;
+          addWall(wx, y*TILE - TILE/2, wx, y*TILE + TILE/2);
+        }
+        if (y < room.y + room.h - 1) {
+          cells[y][x].walls.S = true;
+          cells[y+1][x].walls.N = true;
+          const wz = y*TILE + TILE/2;
+          addWall(x*TILE - TILE/2, wz, x*TILE + TILE/2, wz);
+        }
+      }
     }
   }
 
@@ -1328,6 +1396,375 @@ const sharedGeoms = {
   electric: new THREE.PlaneGeometry(TILE*0.8, TILE*0.8),
   trip: new THREE.CylinderGeometry(0.01, 0.01, TILE, 4),
 };
+
+// ------------------------------------------------------------------
+// PROPS — room dressing per theme
+// ------------------------------------------------------------------
+// Each builder returns { mesh: THREE.Group, footprint: { w, d, h } }.
+// footprint.w and d are the XZ collision size (used to block movement),
+// h is just for visuals. If `nocollide: true`, prop is passable.
+
+const propMats = {
+  wood:      new THREE.MeshStandardMaterial({ color: 0x5a3a1a, roughness: 0.9 }),
+  darkWood:  new THREE.MeshStandardMaterial({ color: 0x3a2410, roughness: 0.95 }),
+  metal:     new THREE.MeshStandardMaterial({ color: 0x5a5a5a, roughness: 0.5, metalness: 0.6 }),
+  darkMetal: new THREE.MeshStandardMaterial({ color: 0x303030, roughness: 0.4, metalness: 0.8 }),
+  rust:      new THREE.MeshStandardMaterial({ color: 0x6a3018, roughness: 0.85, metalness: 0.3 }),
+  stone:     new THREE.MeshStandardMaterial({ color: 0x5e5e56, roughness: 0.95 }),
+  cloth:     new THREE.MeshStandardMaterial({ color: 0x402020, roughness: 0.95 }),
+  white:     new THREE.MeshStandardMaterial({ color: 0xd8d8d0, roughness: 0.6 }),
+  linen:     new THREE.MeshStandardMaterial({ color: 0xa8a090, roughness: 0.9 }),
+  bone:      new THREE.MeshStandardMaterial({ color: 0xd8cfa8, roughness: 0.8 }),
+  bookRed:   new THREE.MeshStandardMaterial({ color: 0x6a2020, roughness: 0.85 }),
+  bookBlue:  new THREE.MeshStandardMaterial({ color: 0x1e3a68, roughness: 0.85 }),
+  bookGreen: new THREE.MeshStandardMaterial({ color: 0x2a5a30, roughness: 0.85 }),
+};
+
+function propAttach(g, ...children) { for (const c of children) g.add(c); return g; }
+
+// --- Generic (available to every theme) ---
+function propCrate() {
+  const g = new THREE.Group();
+  const box = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), propMats.wood);
+  box.position.y = 0.45; box.castShadow = true; box.receiveShadow = true;
+  // Slat lines on top for detail
+  const slat = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.02, 0.04), propMats.darkWood);
+  slat.position.set(0, 0.91, 0);
+  propAttach(g, box, slat);
+  return { mesh: g, footprint: { w: 0.95, d: 0.95, h: 0.9 } };
+}
+function propBarrel() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.45, 1.0, 16), propMats.wood);
+  body.position.y = 0.5; body.castShadow = true; body.receiveShadow = true;
+  const ringGeom = new THREE.TorusGeometry(0.43, 0.025, 6, 16);
+  const ringTop = new THREE.Mesh(ringGeom, propMats.darkMetal);
+  ringTop.position.y = 0.85; ringTop.rotation.x = Math.PI/2;
+  const ringBot = ringTop.clone(); ringBot.position.y = 0.15;
+  propAttach(g, body, ringTop, ringBot);
+  return { mesh: g, footprint: { w: 0.95, d: 0.95, h: 1.0 } };
+}
+function propBench() {
+  const g = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.08, 0.5), propMats.wood);
+  seat.position.y = 0.5; seat.castShadow = true;
+  const legGeom = new THREE.BoxGeometry(0.08, 0.5, 0.45);
+  const leg1 = new THREE.Mesh(legGeom, propMats.darkWood); leg1.position.set(-0.8, 0.25, 0);
+  const leg2 = new THREE.Mesh(legGeom, propMats.darkWood); leg2.position.set(0.8, 0.25, 0);
+  propAttach(g, seat, leg1, leg2);
+  return { mesh: g, footprint: { w: 1.9, d: 0.6, h: 0.6 } };
+}
+function propChair() {
+  const g = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.5), propMats.wood);
+  seat.position.y = 0.45;
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.06), propMats.wood);
+  back.position.set(0, 0.75, -0.22);
+  const legGeom = new THREE.BoxGeometry(0.06, 0.45, 0.06);
+  const positions = [[-0.2,0.22,-0.2],[0.2,0.22,-0.2],[-0.2,0.22,0.2],[0.2,0.22,0.2]];
+  for (const p of positions) {
+    const l = new THREE.Mesh(legGeom, propMats.darkWood);
+    l.position.set(...p); g.add(l);
+  }
+  propAttach(g, seat, back);
+  return { mesh: g, footprint: { w: 0.6, d: 0.6, h: 1.05 } };
+}
+function propDebris() {
+  const g = new THREE.Group();
+  const count = 4 + Math.floor(Math.random()*4);
+  for (let i = 0; i < count; i++) {
+    const sz = 0.15 + Math.random()*0.25;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(sz, sz, sz), propMats.stone);
+    m.position.set((Math.random()-0.5)*0.8, sz/2 + Math.random()*0.1, (Math.random()-0.5)*0.8);
+    m.rotation.set(Math.random(), Math.random(), Math.random());
+    g.add(m);
+  }
+  return { mesh: g, footprint: { w: 0.9, d: 0.9, h: 0.4 }, nocollide: true };
+}
+function propCorpse() {
+  const g = new THREE.Group();
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.25, 0.7, 4, 8), propMats.cloth);
+  torso.rotation.z = Math.PI/2; torso.position.set(0, 0.25, 0);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), propMats.linen);
+  head.position.set(0.6, 0.22, 0);
+  propAttach(g, torso, head);
+  return { mesh: g, footprint: { w: 1.5, d: 0.7, h: 0.5 }, nocollide: true };
+}
+
+// --- Theme-specific ---
+function propGurney() {
+  const g = new THREE.Group();
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.1, 0.7), propMats.white);
+  top.position.y = 0.9;
+  const sheet = new THREE.Mesh(new THREE.BoxGeometry(1.95, 0.02, 0.65), propMats.cloth);
+  sheet.position.y = 0.97;
+  const legGeom = new THREE.CylinderGeometry(0.03, 0.03, 0.85, 6);
+  const lp = [[-0.9,0.42,-0.3],[0.9,0.42,-0.3],[-0.9,0.42,0.3],[0.9,0.42,0.3]];
+  for (const p of lp) {
+    const l = new THREE.Mesh(legGeom, propMats.metal);
+    l.position.set(...p); g.add(l);
+  }
+  const wheelGeom = new THREE.TorusGeometry(0.08, 0.03, 6, 10);
+  for (const p of lp) {
+    const w = new THREE.Mesh(wheelGeom, propMats.darkMetal);
+    w.position.set(p[0], 0.08, p[2]); w.rotation.z = Math.PI/2; g.add(w);
+  }
+  propAttach(g, top, sheet);
+  return { mesh: g, footprint: { w: 2.1, d: 0.8, h: 1.0 } };
+}
+function propIVStand() {
+  const g = new THREE.Group();
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.8, 6), propMats.metal);
+  pole.position.y = 0.9;
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.04, 12), propMats.metal);
+  base.position.y = 0.02;
+  const bag = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.04), new THREE.MeshStandardMaterial({ color: 0xdf4040, roughness: 0.3, transparent: true, opacity: 0.9 }));
+  bag.position.set(0.08, 1.5, 0);
+  propAttach(g, pole, base, bag);
+  return { mesh: g, footprint: { w: 0.45, d: 0.45, h: 1.8 } };
+}
+function propWheelchair() {
+  const g = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.08, 0.55), propMats.darkMetal);
+  seat.position.y = 0.5;
+  const back = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.06), propMats.darkMetal);
+  back.position.set(0, 0.85, -0.25);
+  const wheelGeom = new THREE.TorusGeometry(0.3, 0.04, 8, 16);
+  const wL = new THREE.Mesh(wheelGeom, propMats.darkMetal); wL.position.set(-0.35, 0.3, 0); wL.rotation.y = Math.PI/2;
+  const wR = new THREE.Mesh(wheelGeom, propMats.darkMetal); wR.position.set( 0.35, 0.3, 0); wR.rotation.y = Math.PI/2;
+  propAttach(g, seat, back, wL, wR);
+  return { mesh: g, footprint: { w: 0.8, d: 0.7, h: 1.2 } };
+}
+function propBookshelf() {
+  const g = new THREE.Group();
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.4, 2.0, 0.4), propMats.darkWood);
+  frame.position.y = 1.0;
+  // Three shelves
+  for (let i = 0; i < 3; i++) {
+    const y = 0.4 + i*0.55;
+    // Books as a row of colored boxes
+    for (let j = 0; j < 6; j++) {
+      const col = [propMats.bookRed, propMats.bookBlue, propMats.bookGreen, propMats.darkWood][(j+i) % 4];
+      const bw = 0.15 + Math.random()*0.08;
+      const bh = 0.28 + Math.random()*0.15;
+      const book = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, 0.2), col);
+      book.position.set(-0.55 + j*0.2, y + bh/2, 0.1);
+      g.add(book);
+    }
+  }
+  propAttach(g, frame);
+  return { mesh: g, footprint: { w: 1.5, d: 0.5, h: 2.0 } };
+}
+function propReadingTable() {
+  const g = new THREE.Group();
+  const top = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.08, 0.8), propMats.wood);
+  top.position.y = 0.8;
+  const legGeom = new THREE.BoxGeometry(0.08, 0.75, 0.08);
+  const lp = [[-0.6,0.38,-0.35],[0.6,0.38,-0.35],[-0.6,0.38,0.35],[0.6,0.38,0.35]];
+  for (const p of lp) {
+    const l = new THREE.Mesh(legGeom, propMats.darkWood); l.position.set(...p); g.add(l);
+  }
+  // book on top
+  const book = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.05, 0.2), propMats.bookRed);
+  book.position.set(0.1, 0.87, 0);
+  propAttach(g, top, book);
+  return { mesh: g, footprint: { w: 1.4, d: 0.9, h: 0.85 } };
+}
+function propPew() {
+  const g = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 0.45), propMats.darkWood);
+  seat.position.y = 0.5;
+  const back = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 0.08), propMats.darkWood);
+  back.position.set(0, 0.9, -0.2);
+  const legGeom = new THREE.BoxGeometry(0.08, 0.5, 0.45);
+  const l1 = new THREE.Mesh(legGeom, propMats.darkWood); l1.position.set(-1.0, 0.25, 0);
+  const l2 = new THREE.Mesh(legGeom, propMats.darkWood); l2.position.set( 1.0, 0.25, 0);
+  propAttach(g, seat, back, l1, l2);
+  return { mesh: g, footprint: { w: 2.3, d: 0.55, h: 1.3 } };
+}
+function propAltar() {
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.1, 0.8), propMats.stone);
+  base.position.y = 0.55;
+  const top = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.1, 0.9), propMats.stone);
+  top.position.y = 1.15;
+  const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 8), new THREE.MeshStandardMaterial({ color: 0xe8e0c0, emissive: 0xffc040, emissiveIntensity: 0.6 }));
+  candle.position.set(0, 1.32, 0);
+  propAttach(g, base, top, candle);
+  return { mesh: g, footprint: { w: 1.8, d: 1.0, h: 1.3 } };
+}
+function propCoffin() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.4, 2.0), propMats.darkWood);
+  body.position.y = 0.2;
+  const lid = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.05, 2.05), propMats.darkWood);
+  lid.position.y = 0.42;
+  propAttach(g, body, lid);
+  return { mesh: g, footprint: { w: 1.1, d: 2.1, h: 0.45 } };
+}
+function propSkullPile() {
+  const g = new THREE.Group();
+  for (let i = 0; i < 5; i++) {
+    const sz = 0.12 + Math.random()*0.06;
+    const s = new THREE.Mesh(new THREE.SphereGeometry(sz, 8, 8), propMats.bone);
+    s.position.set((Math.random()-0.5)*0.8, sz, (Math.random()-0.5)*0.8);
+    g.add(s);
+  }
+  return { mesh: g, footprint: { w: 1.0, d: 1.0, h: 0.3 }, nocollide: true };
+}
+function propChains() {
+  const g = new THREE.Group();
+  const linkGeom = new THREE.TorusGeometry(0.05, 0.015, 4, 6);
+  for (let k = 0; k < 2; k++) {
+    const xOff = (k === 0 ? -0.3 : 0.3);
+    for (let i = 0; i < 8; i++) {
+      const link = new THREE.Mesh(linkGeom, propMats.darkMetal);
+      link.position.set(xOff, WALL_H - 0.2 - i*0.12, 0);
+      if (i % 2 === 0) link.rotation.y = Math.PI/2;
+      g.add(link);
+    }
+  }
+  return { mesh: g, footprint: { w: 0.8, d: 0.3, h: 1.2 }, nocollide: true };
+}
+function propPipe() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 3.5, 12), propMats.rust);
+  body.rotation.z = Math.PI/2;
+  body.position.y = WALL_H - 0.6;
+  const flange1 = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.15, 12), propMats.darkMetal);
+  flange1.rotation.z = Math.PI/2; flange1.position.set(-1.6, WALL_H - 0.6, 0);
+  const flange2 = flange1.clone(); flange2.position.set(1.6, WALL_H - 0.6, 0);
+  propAttach(g, body, flange1, flange2);
+  return { mesh: g, footprint: { w: 3.6, d: 0.6, h: 0.6 }, nocollide: true };
+}
+function propGrate() {
+  const g = new THREE.Group();
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.08, 1.2), propMats.darkMetal);
+  frame.position.y = 0.05;
+  // bars
+  for (let i = 0; i < 5; i++) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.04, 0.05), propMats.metal);
+    bar.position.set(0, 0.09, -0.5 + i*0.25); g.add(bar);
+  }
+  propAttach(g, frame);
+  return { mesh: g, footprint: { w: 1.3, d: 1.3, h: 0.1 }, nocollide: true };
+}
+function propTombstone() {
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.15, 0.4), propMats.stone);
+  base.position.y = 0.075;
+  const stone = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.2), propMats.stone);
+  stone.position.y = 0.65;
+  propAttach(g, base, stone);
+  return { mesh: g, footprint: { w: 1.0, d: 0.5, h: 1.2 } };
+}
+function propMineCart() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 0.7), propMats.darkWood);
+  body.position.y = 0.55;
+  const wheelGeom = new THREE.TorusGeometry(0.18, 0.04, 6, 12);
+  for (const x of [-0.5, 0.5]) for (const z of [-0.3, 0.3]) {
+    const w = new THREE.Mesh(wheelGeom, propMats.darkMetal);
+    w.position.set(x, 0.2, z); w.rotation.y = Math.PI/2; g.add(w);
+  }
+  propAttach(g, body);
+  return { mesh: g, footprint: { w: 1.3, d: 0.9, h: 0.9 } };
+}
+
+const PROP_POOL = {
+  generic:   [propCrate, propBarrel, propBench, propChair, propDebris, propCorpse],
+  hospital:  [propGurney, propIVStand, propWheelchair, propCorpse, propBench],
+  dungeon:   [propChains, propSkullPile, propBarrel, propCrate, propDebris, propCorpse],
+  asylum:    [propWheelchair, propChair, propBench, propCorpse, propDebris],
+  mine:      [propMineCart, propBarrel, propCrate, propDebris, propChains],
+  meat:      [propBarrel, propChains, propDebris, propCorpse],
+  library:   [propBookshelf, propReadingTable, propChair, propCorpse, propBench],
+  sewer:     [propPipe, propGrate, propBarrel, propCrate, propDebris],
+  factory:   [propCrate, propBarrel, propMineCart, propChains, propDebris],
+  cave:      [propDebris, propSkullPile, propBarrel, propCorpse],
+  cathedral: [propPew, propAltar, propTombstone, propBench, propCandelabra],
+  prison:    [propBench, propChair, propChains, propCorpse, propCrate],
+  crypt:     [propCoffin, propTombstone, propSkullPile, propCorpse, propDebris],
+  mansion:   [propChair, propReadingTable, propBookshelf, propBench, propCorpse],
+  lab:       [propGurney, propIVStand, propReadingTable, propChair, propCrate],
+  subway:    [propBench, propCrate, propBarrel, propDebris, propPipe],
+  attic:     [propCrate, propChair, propDebris, propCorpse, propBench],
+};
+function propCandelabra() {
+  const g = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 0.1, 8), propMats.darkMetal);
+  base.position.y = 0.05;
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.3, 6), propMats.darkMetal);
+  pole.position.y = 0.7;
+  const candleMat = new THREE.MeshStandardMaterial({ color: 0xe8e0c0, emissive: 0xffc040, emissiveIntensity: 0.7 });
+  for (let i = -1; i <= 1; i++) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.3), propMats.darkMetal);
+    arm.position.set(i*0.1, 1.25, 0.1);
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.2, 6), candleMat);
+    c.position.set(i*0.2, 1.35, 0.2);
+    propAttach(g, arm, c);
+  }
+  propAttach(g, base, pole);
+  return { mesh: g, footprint: { w: 0.5, d: 0.5, h: 1.5 } };
+}
+
+// Spawn props in carved rooms. Adds visible meshes to levelGroup and (for
+// collidable props) pushes AABBs into wallAABBs for movement/line-of-sight.
+function spawnPropsInRooms(themeId, rooms, rng, wallAABBs, forbidden=[]) {
+  const pool = PROP_POOL[themeId] || PROP_POOL.generic;
+  const allProps = pool.concat(PROP_POOL.generic);
+  const isForbidden = (cx, cy) => forbidden.some(([fx, fy]) => fx === cx && fy === cy);
+  for (const room of rooms) {
+    const cellCount = room.w * room.h;
+    const target = 2 + Math.floor(rng() * Math.min(4, cellCount - 1));
+    const placed = [];
+    let tries = 0;
+    while (placed.length < target && tries < target * 6) {
+      tries++;
+      const builder = allProps[Math.floor(rng() * allProps.length)];
+      const result = builder();
+      const fw = result.footprint.w, fd = result.footprint.d;
+      // Pick a random cell in the room, then a random offset within that cell
+      const cx = room.x + Math.floor(rng() * room.w);
+      const cy = room.y + Math.floor(rng() * room.h);
+      if (isForbidden(cx, cy)) continue;
+      const center = cellToWorld(cx, cy);
+      const jx = (rng() - 0.5) * (TILE - fw - 0.3);
+      const jz = (rng() - 0.5) * (TILE - fd - 0.3);
+      const wx = center.x + jx;
+      const wz = center.z + jz;
+      // Rotate 0 or 90 degrees
+      const rotY = (rng() < 0.5) ? 0 : Math.PI/2;
+      const isRot = Math.abs(rotY) > 0.01;
+      const halfW = (isRot ? fd : fw) / 2;
+      const halfD = (isRot ? fw : fd) / 2;
+      const aabb = { minX: wx - halfW, maxX: wx + halfW, minZ: wz - halfD, maxZ: wz + halfD };
+      // Don't overlap already-placed props
+      let overlap = false;
+      for (const p of placed) {
+        if (aabb.minX < p.maxX && aabb.maxX > p.minX && aabb.minZ < p.maxZ && aabb.maxZ > p.minZ) {
+          overlap = true; break;
+        }
+      }
+      if (overlap) continue;
+      // Don't overlap existing walls
+      for (const w of wallAABBs) {
+        // Small padding so we don't touch walls
+        if (aabb.minX - 0.15 < w.maxX && aabb.maxX + 0.15 > w.minX && aabb.minZ - 0.15 < w.maxZ && aabb.maxZ + 0.15 > w.minZ) {
+          overlap = true; break;
+        }
+      }
+      if (overlap) continue;
+      result.mesh.position.set(wx, 0, wz);
+      result.mesh.rotation.y = rotY;
+      result.mesh.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+      levelGroup.add(result.mesh);
+      placed.push(aabb);
+      if (!result.nocollide) wallAABBs.push(aabb);
+    }
+    room.propCount = placed.length;
+  }
+}
 
 function spawnKeyMesh(x, z) {
   const g = new THREE.Group();
@@ -1833,18 +2270,29 @@ function monsterBodyGLB(url, desiredHeight=2.0, opts={}) {
     g.userData.wrapper = wrapper;
     if (gltf.animations && gltf.animations.length) {
       const mixer = new THREE.AnimationMixer(model);
-      // Preload actions, keyed by common names, so state transitions can cross-fade.
       const actions = {};
       const findClip = rx => gltf.animations.find(c => rx.test(c.name));
+      const findAllClips = rx => gltf.animations.filter(c => rx.test(c.name));
       const idle = findClip(/idle/i);
       const run  = findClip(/run/i);
       const walk = findClip(/walk/i);
-      const attack = findClip(/punch|attack/i);
+      const attackClips = findAllClips(/punch|attack/i);
       if (idle) actions.idle = mixer.clipAction(idle);
       if (run)  actions.run  = mixer.clipAction(run);
       if (walk) actions.walk = mixer.clipAction(walk);
-      if (attack) actions.attack = mixer.clipAction(attack);
-      // Fallback: first clip as "idle"
+      // Attack animations play once; array lets the AI pick one at random so
+      // multi-punch models don't always swing the same way.
+      actions.attacks = attackClips.map(c => {
+        const a = mixer.clipAction(c);
+        a.setLoop(THREE.LoopOnce);
+        a.clampWhenFinished = false;
+        return a;
+      });
+      actions.attackDuration = attackClips.length
+        ? attackClips.reduce((s, c) => s + c.duration, 0) / attackClips.length
+        : 0;
+      // Keep `attack` key pointing at the first one for the state picker below.
+      if (actions.attacks.length) actions.attack = actions.attacks[0];
       if (!actions.idle) actions.idle = mixer.clipAction(gltf.animations[0]);
       actions.idle.play();
       g.userData.mixer = mixer;
@@ -2118,6 +2566,74 @@ addEventListener('mousedown', e => {
 // ------------------------------------------------------------------
 // COLLISION
 // ------------------------------------------------------------------
+// BFS shortest path through maze cells. Returns [[cx,cy], ...] from start to
+// target inclusive, or null if unreachable. Respects each cell's walls (including
+// walls that carveRooms opened and wall-restoration re-closed).
+function bfsPath(cells, sx, sy, tx, ty) {
+  if (!cells) return null;
+  const h = cells.length, w = cells[0].length;
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return null;
+  if (tx < 0 || ty < 0 || tx >= w || ty >= h) return null;
+  if (sx === tx && sy === ty) return [[sx, sy]];
+  const seen = Array.from({length: h}, () => new Array(w).fill(false));
+  const prev = Array.from({length: h}, () => new Array(w).fill(null));
+  seen[sy][sx] = true;
+  const q = [[sx, sy]];
+  let head = 0;
+  while (head < q.length) {
+    const [x, y] = q[head++];
+    const c = cells[y][x];
+    const neigh = [
+      [!c.walls.N, x, y - 1],
+      [!c.walls.E, x + 1, y],
+      [!c.walls.S, x, y + 1],
+      [!c.walls.W, x - 1, y],
+    ];
+    for (const [open, nx, ny] of neigh) {
+      if (!open) continue;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      if (seen[ny][nx]) continue;
+      seen[ny][nx] = true;
+      prev[ny][nx] = [x, y];
+      if (nx === tx && ny === ty) {
+        const path = [[nx, ny]];
+        let cur = [x, y];
+        while (cur) { path.unshift(cur); cur = prev[cur[1]][cur[0]]; }
+        return path;
+      }
+      q.push([nx, ny]);
+    }
+  }
+  return null;
+}
+
+// Pick a cell neighbor to wander toward, preferring not to double back. Mutates
+// m.targetCellX/Y/prevDir. Returns true if a new target was set.
+function pickWanderCell(m) {
+  const cells = STATE.levelMeta?.cells;
+  if (!cells) return false;
+  const cx = Math.round(m.pos[0] / TILE);
+  const cy = Math.round(m.pos[2] / TILE);
+  if (cy < 0 || cy >= cells.length || cx < 0 || cx >= cells[0].length) return false;
+  const cell = cells[cy][cx];
+  const dirs = [];
+  if (!cell.walls.N) dirs.push([0, -1]);
+  if (!cell.walls.E) dirs.push([1,  0]);
+  if (!cell.walls.S) dirs.push([0,  1]);
+  if (!cell.walls.W) dirs.push([-1, 0]);
+  if (!dirs.length) { m.targetCellX = null; return false; }
+  // If there are multiple options, avoid reversing the previous step
+  if (dirs.length > 1 && m.prevDir) {
+    const filt = dirs.filter(d => !(d[0] === -m.prevDir[0] && d[1] === -m.prevDir[1]));
+    if (filt.length) { dirs.length = 0; dirs.push(...filt); }
+  }
+  const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
+  m.targetCellX = cx + dx;
+  m.targetCellY = cy + dy;
+  m.prevDir = [dx, dy];
+  return true;
+}
+
 // Line-of-sight check between two 2D points (X-Z plane). Returns true if no wall
 // AABB blocks the segment, false if any wall intersects it.
 function hasLineOfSight(x1, z1, x2, z2) {
@@ -3115,7 +3631,7 @@ function updateMonstersHost(dt) {
     }
 
     if (m.state === 'chase' && closest) {
-      // Track line-of-sight to target. If we can't see them for 5s, give up.
+      // Track line-of-sight. Lose interest after 5s without seeing them.
       const canSee = (def.special === 'phantom') ||
         hasLineOfSight(m.pos[0], m.pos[2], closest.pos[0], closest.pos[2]);
       if (canSee) {
@@ -3129,21 +3645,55 @@ function updateMonstersHost(dt) {
           m.stateT = 1 + Math.random()*2;
           m.targetId = null;
           m.lostSightT = 0;
+          m.path = null;
+          m.targetCellX = null;
           continue;
         }
       }
-      // Chase target if seen, otherwise head to last-seen point
-      const goalX = canSee ? closest.pos[0] : (m.lastSeenX ?? closest.pos[0]);
-      const goalZ = canSee ? closest.pos[2] : (m.lastSeenZ ?? closest.pos[2]);
+      // Pick a goal: direct to player when we see them, else toward last-seen cell.
+      let goalX, goalZ;
+      if (canSee || def.special === 'phantom') {
+        goalX = closest.pos[0];
+        goalZ = closest.pos[2];
+        m.path = null;
+      } else {
+        // BFS path through cells. Recompute periodically or when we arrive at a waypoint.
+        const cells = STATE.levelMeta?.cells;
+        m.pathRecomputeT = (m.pathRecomputeT || 0) - dt;
+        const mcx = Math.round(m.pos[0] / TILE);
+        const mcy = Math.round(m.pos[2] / TILE);
+        const tcx = Math.round((m.lastSeenX ?? closest.pos[0]) / TILE);
+        const tcy = Math.round((m.lastSeenZ ?? closest.pos[2]) / TILE);
+        if (!m.path || m.pathRecomputeT <= 0 || m.pathIndex >= (m.path?.length||0)) {
+          m.path = cells ? bfsPath(cells, mcx, mcy, tcx, tcy) : null;
+          m.pathIndex = m.path ? 1 : 0;  // skip our own cell
+          m.pathRecomputeT = 0.6;
+        }
+        if (m.path && m.pathIndex < m.path.length) {
+          const [gcx, gcy] = m.path[m.pathIndex];
+          goalX = gcx * TILE;
+          goalZ = gcy * TILE;
+          // Advance waypoint when close enough
+          if (Math.hypot(goalX - m.pos[0], goalZ - m.pos[2]) < 0.35) m.pathIndex++;
+        } else {
+          // No path — idle for now
+          goalX = m.pos[0]; goalZ = m.pos[2];
+        }
+      }
       const dx = goalX - m.pos[0], dz = goalZ - m.pos[2];
       const d = Math.hypot(dx, dz) || 0.001;
-      const vx = (dx/d)*def.speed, vz = (dz/d)*def.speed;
-      let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
-      if (def.special !== 'phantom') {
-        const fixed = collidePoint(nx, nz, 0.4);
-        nx = fixed.x; nz = fixed.z;
+      // While the attack animation is playing, hold position so the swing reads
+      // cleanly. Still turn to face the target.
+      const swinging = performance.now() < (m.attackAnimUntil || 0);
+      if (!swinging) {
+        const vx = (dx/d)*def.speed, vz = (dz/d)*def.speed;
+        let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
+        if (def.special !== 'phantom') {
+          const fixed = collidePoint(nx, nz, 0.4);
+          nx = fixed.x; nz = fixed.z;
+        }
+        m.pos[0] = nx; m.pos[2] = nz;
       }
-      m.pos[0] = nx; m.pos[2] = nz;
       m.yaw = Math.atan2(dx, dz);
 
       // Attack (only if still in direct sight of the real player)
@@ -3151,6 +3701,22 @@ function updateMonstersHost(dt) {
       const realD = Math.hypot(closest.pos[0]-m.pos[0], closest.pos[2]-m.pos[2]);
       if (canSee && realD < def.attackRange && m.attackT <= 0) {
         const willKill = closest.hp <= def.damage;
+        // Play a random attack/punch clip if the model has any
+        const attacks = m.mesh.userData?.actions?.attacks;
+        if (attacks && attacks.length) {
+          const pick = attacks[Math.floor(Math.random() * attacks.length)];
+          const ud = m.mesh.userData;
+          // Stop other actions and start this attack from frame 0
+          if (ud.currentAction && ud.actions[ud.currentAction] && ud.actions[ud.currentAction] !== pick) {
+            ud.actions[ud.currentAction].fadeOut(0.08);
+          }
+          pick.reset().fadeIn(0.05).play();
+          ud.currentAction = '__attack__';
+          // Track when the swing ends so movement stays frozen and the picker
+          // doesn't rip the animation out mid-punch.
+          const dur = (pick.getClip && pick.getClip().duration) || m.mesh.userData.actions.attackDuration || 0.9;
+          m.attackAnimUntil = performance.now() + dur * 1000;
+        }
         broadcastPlayerDamage(closest, def.damage, def.name);
         if (def.special === 'leech') {
           sendEvent && sendEvent({ type: 'slowed', id: closest.id, duration: 2 });
@@ -3179,35 +3745,43 @@ function updateMonstersHost(dt) {
         }
       }
     } else {
-      // Idle/patrol: alternate between STANDING STILL and WANDERING.
-      // m.moving = true while walking, false while pausing.
+      // Idle/patrol: alternate between STANDING STILL and WANDERING through the
+      // maze graph. Monsters only walk toward cells they can actually reach.
       m.idleT = (m.idleT || 0) + dt;
       if (m.moving === undefined) { m.moving = false; m.idleDur = 1.5 + Math.random()*1.5; }
       if (m.idleT >= m.idleDur) {
         m.moving = !m.moving;
         m.idleT = 0;
         if (m.moving) {
-          m.yaw += (Math.random()-0.5) * Math.PI;     // pick a new direction
-          m.idleDur = 2.5 + Math.random()*3;          // walk for 2.5–5.5s
+          pickWanderCell(m);
+          m.idleDur = 2.5 + Math.random()*3;
         } else {
-          m.idleDur = 1.2 + Math.random()*2.3;        // stand for 1.2–3.5s
+          m.targetCellX = null;
+          m.idleDur = 1.2 + Math.random()*2.3;
         }
       }
-      if (m.moving) {
-        const vx = Math.sin(m.yaw)*def.speed*0.4, vz = Math.cos(m.yaw)*def.speed*0.4;
-        let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
-        if (def.special !== 'phantom') {
+      if (m.moving && m.targetCellX != null && def.special !== 'phantom') {
+        const gx = m.targetCellX * TILE;
+        const gz = m.targetCellY * TILE;
+        const dx = gx - m.pos[0], dz = gz - m.pos[2];
+        const d = Math.hypot(dx, dz);
+        if (d < 0.25) {
+          // Arrived — pick the next neighbor and keep walking
+          pickWanderCell(m);
+        } else {
+          const speed = def.speed * 0.4;
+          const vx = (dx/d) * speed, vz = (dz/d) * speed;
+          let nx = m.pos[0] + vx*dt, nz = m.pos[2] + vz*dt;
           const fixed = collidePoint(nx, nz, 0.4);
-          // If blocked, turn and pause briefly
-          if (Math.hypot(fixed.x - (m.pos[0] + vx*dt), fixed.z - (m.pos[2] + vz*dt)) > 0.01) {
-            m.yaw += Math.PI * 0.5 * (Math.random()<0.5 ? 1 : -1);
-            m.moving = false;
-            m.idleT = 0;
-            m.idleDur = 0.8 + Math.random()*0.6;
-          }
           nx = fixed.x; nz = fixed.z;
+          m.pos[0] = nx; m.pos[2] = nz;
+          m.yaw = Math.atan2(dx, dz);
         }
-        m.pos[0] = nx; m.pos[2] = nz;
+      } else if (m.moving && def.special === 'phantom') {
+        // Phantoms ignore walls — keep the old free-direction wander
+        const vx = Math.sin(m.yaw)*def.speed*0.4, vz = Math.cos(m.yaw)*def.speed*0.4;
+        m.pos[0] += vx*dt;
+        m.pos[2] += vz*dt;
       }
     }
 
@@ -3238,20 +3812,27 @@ function updateMonsterMixers(dt) {
     if (!ud?.mixer) continue;
     // Crossfade between animations based on monster state
     if (ud.actions) {
-      let target = 'idle';
-      if (m.state === 'chase') {
-        target = ud.actions.run ? 'run' : (ud.actions.walk ? 'walk' : 'idle');
-      } else if (m.state === 'idle' || m.state === 'patrol') {
-        // Walk while actively wandering, idle while standing still.
-        const movingNow = !!m.moving;
-        target = (movingNow && ud.actions.walk) ? 'walk' : 'idle';
-      }
-      if (target !== ud.currentAction && ud.actions[target]) {
-        const prev = ud.actions[ud.currentAction];
-        const next = ud.actions[target];
-        next.reset().play();
-        if (prev) prev.crossFadeTo(next, 0.25, false);
-        ud.currentAction = target;
+      // While a punch is playing, don't touch the state machine; let the
+      // LoopOnce attack clip run to completion.
+      const attacking = performance.now() < (m.attackAnimUntil || 0);
+      if (!attacking) {
+        let target = 'idle';
+        if (m.state === 'chase') {
+          target = ud.actions.run ? 'run' : (ud.actions.walk ? 'walk' : 'idle');
+        } else if (m.state === 'idle' || m.state === 'patrol') {
+          const movingNow = !!m.moving;
+          target = (movingNow && ud.actions.walk) ? 'walk' : 'idle';
+        }
+        if (target !== ud.currentAction && ud.actions[target]) {
+          const prev = ud.actions[ud.currentAction];
+          const next = ud.actions[target];
+          next.reset().play();
+          // Cross-fading from an attack clip that just finished would look
+          // snappy — use a simple fadeIn instead.
+          if (prev && ud.currentAction !== '__attack__') prev.crossFadeTo(next, 0.25, false);
+          else next.fadeIn(0.12);
+          ud.currentAction = target;
+        }
       }
     }
     ud.mixer.update(dt);
