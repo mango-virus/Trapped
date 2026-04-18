@@ -900,6 +900,16 @@ function buildTheme(themeId) {
       return [v + 8, v + 3, v - 2, 255];
     });
   }
+  else if (themeId === 'horror_hall') {
+    themeName = 'Horror Corridor';
+    accentColor = 0xffb050; fogColor = 0x0a0a10; lightColor = 0xffc070;
+    // Materials are unused at render time for this theme — the kit supplies
+    // its own baked materials. We still return valid placeholders so code
+    // paths that reference theme.wallMat/floorMat/ceilMat don't crash.
+    wallCanvas = makeNoiseCanvas(4, 4, () => [100, 100, 100, 255]);
+    floorCanvas = makeNoiseCanvas(4, 4, () => [60, 60, 60, 255]);
+    ceilCanvas = makeNoiseCanvas(4, 4, () => [40, 40, 40, 255]);
+  }
   else { // fallback: stone
     themeName = 'Ancient Stone';
     accentColor = 0xccccff; fogColor = 0x0a0a14; lightColor = 0xccccff;
@@ -933,6 +943,7 @@ function buildTheme(themeId) {
     id: themeId, name: themeName,
     wallMat, floorMat, ceilMat,
     accentColor, fogColor, lightColor,
+    isKit: themeId === 'horror_hall',
   };
   texCache.set(key, theme);
   return theme;
@@ -941,6 +952,7 @@ function buildTheme(themeId) {
 const THEMES = [
   'hospital', 'dungeon', 'asylum', 'mine', 'meat', 'library', 'sewer', 'factory',
   'cave', 'cathedral', 'prison', 'crypt', 'mansion', 'lab', 'subway', 'attic',
+  'horror_hall',
 ];
 
 // ------------------------------------------------------------------
@@ -1082,7 +1094,9 @@ function buildLevel() {
   clearLevel();
   const level = STATE.level;
   const rng = mulberry32(STATE.seed + level*7919);
-  const themeId = THEMES[Math.floor(rng()*THEMES.length)];
+  // TESTING: always spawn horror_hall on level 1 so the kit is guaranteed to
+  // show up every run. Remove this override once the theme feels right.
+  const themeId = level === 1 ? 'horror_hall' : THEMES[Math.floor(rng()*THEMES.length)];
   const theme = buildTheme(themeId);
   const size = Math.min(40, 8 + Math.floor(level*1.6));
   const cells = generateMaze(rng, size, size);
@@ -1093,51 +1107,96 @@ function buildLevel() {
   scene.fog = new THREE.FogExp2(theme.fogColor, 0.015);
   scene.background = new THREE.Color(theme.fogColor);
 
-  // Floor & ceiling — merge into big planes (one per cell is heavy, so repeat the texture on one big plane)
-  const bigFloor = new THREE.Mesh(
-    new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
-    theme.floorMat.clone()
-  );
-  bigFloor.material.map = theme.floorMat.map.clone();
-  bigFloor.material.map.needsUpdate = true;
-  bigFloor.material.map.wrapS = bigFloor.material.map.wrapT = THREE.RepeatWrapping;
-  bigFloor.material.map.repeat.set(size+2, size+2);
-  bigFloor.rotation.x = -Math.PI/2;
-  bigFloor.position.set(size*TILE/2 - TILE/2, 0, size*TILE/2 - TILE/2);
-  bigFloor.receiveShadow = true;
-  levelGroup.add(bigFloor);
+  // Only go kit-mode if the GLB has actually finished loading. Otherwise the
+  // level would build with invisible walls and floor. Fall back to procedural
+  // rendering in that case — next level to roll horror_hall will likely succeed.
+  const useKit = theme.isKit && kitPieces.Wall_02 && kitPieces.FloorTile;
 
-  const bigCeil = new THREE.Mesh(
-    new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
-    theme.ceilMat.clone()
-  );
-  bigCeil.material.map = theme.ceilMat.map.clone();
-  bigCeil.material.map.needsUpdate = true;
-  bigCeil.material.map.wrapS = bigCeil.material.map.wrapT = THREE.RepeatWrapping;
-  bigCeil.material.map.repeat.set(size+2, size+2);
-  bigCeil.rotation.x = Math.PI/2;
-  bigCeil.position.set(size*TILE/2 - TILE/2, WALL_H, size*TILE/2 - TILE/2);
-  bigCeil.receiveShadow = true;
-  levelGroup.add(bigCeil);
+  // Floor & ceiling
+  if (useKit) {
+    // Tile the floor with kit FloorTile pieces (2m each → 4 per game cell)
+    for (let y = -1; y <= size; y++) for (let x = -1; x <= size; x++) {
+      for (let sx = 0; sx < 2; sx++) for (let sy = 0; sy < 2; sy++) {
+        const piece = kitPiece('FloorTile');
+        if (!piece) continue;
+        piece.position.set(x*TILE + (sx-0.5)*2, 0, y*TILE + (sy-0.5)*2);
+        levelGroup.add(piece);
+      }
+    }
+    // Kit has no ceiling piece — use a dim plane matching the wall height.
+    const ceilMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1.0 });
+    const bigCeil = new THREE.Mesh(
+      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
+      ceilMat
+    );
+    bigCeil.rotation.x = Math.PI/2;
+    bigCeil.position.set(size*TILE/2 - TILE/2, WALL_H, size*TILE/2 - TILE/2);
+    bigCeil.receiveShadow = true;
+    levelGroup.add(bigCeil);
+  } else {
+    // Procedural tiled floor + ceiling
+    const bigFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
+      theme.floorMat.clone()
+    );
+    bigFloor.material.map = theme.floorMat.map.clone();
+    bigFloor.material.map.needsUpdate = true;
+    bigFloor.material.map.wrapS = bigFloor.material.map.wrapT = THREE.RepeatWrapping;
+    bigFloor.material.map.repeat.set(size+2, size+2);
+    bigFloor.rotation.x = -Math.PI/2;
+    bigFloor.position.set(size*TILE/2 - TILE/2, 0, size*TILE/2 - TILE/2);
+    bigFloor.receiveShadow = true;
+    levelGroup.add(bigFloor);
 
-  // Walls — collect wall segments as AABBs for collision
+    const bigCeil = new THREE.Mesh(
+      new THREE.PlaneGeometry(size*TILE + 2*TILE, size*TILE + 2*TILE),
+      theme.ceilMat.clone()
+    );
+    bigCeil.material.map = theme.ceilMat.map.clone();
+    bigCeil.material.map.needsUpdate = true;
+    bigCeil.material.map.wrapS = bigCeil.material.map.wrapT = THREE.RepeatWrapping;
+    bigCeil.material.map.repeat.set(size+2, size+2);
+    bigCeil.rotation.x = Math.PI/2;
+    bigCeil.position.set(size*TILE/2 - TILE/2, WALL_H, size*TILE/2 - TILE/2);
+    bigCeil.receiveShadow = true;
+    levelGroup.add(bigCeil);
+  }
+
+  // Walls — collect wall segments as AABBs for collision. addWall() dispatches
+  // to procedural BoxGeometry or to kit pieces depending on the theme.
   const wallAABBs = [];
-  function addWall(x1, z1, x2, z2) {
-    const len = Math.hypot(x2-x1, z2-z1);
-    const geom = new THREE.BoxGeometry(len, WALL_H, 0.3);
-    const m = new THREE.Mesh(geom, theme.wallMat);
-    const mx = (x1+x2)/2, mz = (z1+z2)/2;
-    m.position.set(mx, WALL_H/2, mz);
-    m.rotation.y = Math.atan2(z2-z1, x2-x1);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    levelGroup.add(m);
-    // AABB for collision (world-aligned approx)
+  function addWallAABB(x1, z1, x2, z2) {
     const minX = Math.min(x1, x2) - 0.15;
     const maxX = Math.max(x1, x2) + 0.15;
     const minZ = Math.min(z1, z2) - 0.15;
     const maxZ = Math.max(z1, z2) + 0.15;
-    wallAABBs.push({ minX: minX, maxX: maxX, minZ: minZ, maxZ: maxZ });
+    wallAABBs.push({ minX, maxX, minZ, maxZ });
+  }
+  function addWall(x1, z1, x2, z2) {
+    if (useKit) {
+      // Two kit wall pieces along the 4m edge (each piece is 2m wide).
+      const mx = (x1+x2)/2, mz = (z1+z2)/2;
+      const dx = (x2-x1)/4, dz = (z2-z1)/4;  // quarter-length offset to each piece center
+      const angle = -Math.atan2(z2 - z1, x2 - x1);
+      for (const sign of [-1, 1]) {
+        const piece = kitPiece('Wall_02');
+        if (!piece) continue;
+        piece.position.set(mx + dx*sign, 0, mz + dz*sign);
+        piece.rotation.y = angle;
+        levelGroup.add(piece);
+      }
+    } else {
+      const len = Math.hypot(x2-x1, z2-z1);
+      const geom = new THREE.BoxGeometry(len, WALL_H, 0.3);
+      const m = new THREE.Mesh(geom, theme.wallMat);
+      const mx = (x1+x2)/2, mz = (z1+z2)/2;
+      m.position.set(mx, WALL_H/2, mz);
+      m.rotation.y = Math.atan2(z2-z1, x2-x1);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      levelGroup.add(m);
+    }
+    addWallAABB(x1, z1, x2, z2);
   }
 
   for (let y=0;y<size;y++) for (let x=0;x<size;x++) {
@@ -1258,26 +1317,24 @@ function buildLevel() {
     });
   }
 
-  // Traps — scale with level
-  const trapCount = Math.min(20, Math.floor(1 + level*1.2));
-  const trapCandidates = [...candidates];
-  shuffleInPlace(trapCandidates, rng);
-  for (let i=0;i<trapCount && i<trapCandidates.length; i++) {
-    const [cx,cy] = trapCandidates[i];
-    const wp = cellToWorld(cx, cy);
-    const trapTypes = ['pit','bear','spike','gas','dart','crusher','electric','trip'];
-    const trapType = trapTypes[Math.floor(rng()*trapTypes.length)];
-    const trapMesh = spawnTrapMesh(trapType, wp.x, wp.z);
-    STATE.traps.push({
-      id: `trap_${level}_${i}`,
-      type: trapType,
-      pos: [wp.x, 0.02, wp.z],
-      mesh: trapMesh,
-      triggered: false,
-      armed: true,
-      cooldown: 0,
-    });
-  }
+  // Traps disabled for now. To re-enable: set trapCount back to
+  // Math.min(20, Math.floor(1 + level*1.2)) and uncomment the spawn loop
+  // below. spawnTrapMesh() and updateTrapsHost() are still intact.
+  const trapCount = 0;
+  // const trapCandidates = [...candidates];
+  // shuffleInPlace(trapCandidates, rng);
+  // for (let i=0;i<trapCount && i<trapCandidates.length; i++) {
+  //   const [cx,cy] = trapCandidates[i];
+  //   const wp = cellToWorld(cx, cy);
+  //   const trapTypes = ['pit','bear','spike','gas','dart','crusher','electric','trip'];
+  //   const trapType = trapTypes[Math.floor(rng()*trapTypes.length)];
+  //   const trapMesh = spawnTrapMesh(trapType, wp.x, wp.z);
+  //   STATE.traps.push({
+  //     id: `trap_${level}_${i}`, type: trapType,
+  //     pos: [wp.x, 0.02, wp.z], mesh: trapMesh,
+  //     triggered: false, armed: true, cooldown: 0,
+  //   });
+  // }
 
   // Torches / flickering lights — scattered based on theme
   const lightCount = Math.floor(size*size*0.04);
@@ -1689,7 +1746,25 @@ const PROP_POOL = {
   lab:       [propGurney, propIVStand, propReadingTable, propChair, propCrate],
   subway:    [propBench, propCrate, propBarrel, propDebris, propPipe],
   attic:     [propCrate, propChair, propDebris, propCorpse, propBench],
+  horror_hall: [propKitCabinet, propKitMetalCabinet, propKitCabinetShort, propKitWoodBox, propKitCardboardBox, propCorpse],
 };
+
+// Kit-backed prop builders (used by the horror_hall theme). Each clones a
+// named piece out of horror_kit.glb. Falls back to a hidden placeholder if the
+// kit isn't loaded yet so spawnPropsInRooms can just skip it. Declared as
+// functions so they're hoisted before PROP_POOL references them.
+function _kitProp(name, footprint, nocollide=false) {
+  const mesh = kitPiece(name);
+  if (!mesh) {
+    return { mesh: new THREE.Group(), footprint: { w: 0.01, d: 0.01, h: 0.01 }, nocollide: true };
+  }
+  return { mesh, footprint, nocollide };
+}
+function propKitCabinet()       { return _kitProp('Cabinet',       { w: 0.8,  d: 1.7,  h: 3.5 }); }
+function propKitMetalCabinet()  { return _kitProp('Metal_Cabinet', { w: 0.7,  d: 1.7,  h: 2.7 }); }
+function propKitCabinetShort()  { return _kitProp('CabinetShort',  { w: 2.1,  d: 0.95, h: 1.4 }); }
+function propKitWoodBox()       { return _kitProp('Wood_Box',      { w: 0.75, d: 0.55, h: 0.9 }); }
+function propKitCardboardBox()  { return _kitProp('CarboardBox',   { w: 0.5,  d: 0.55, h: 0.8 }); }
 function propCandelabra() {
   const g = new THREE.Group();
   const base = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 0.1, 8), propMats.darkMetal);
@@ -2309,6 +2384,52 @@ function monsterBodyGLB(url, desiredHeight=2.0, opts={}) {
   g.userData.noProcWalkAnim = true;
   return g;
 }
+
+// ------------------------------------------------------------------
+// HORROR MODULAR KIT — loaded once, pieces cloned per-level
+// ------------------------------------------------------------------
+const kitPieces = {};        // canonical name -> source Object3D (clone with .clone(true))
+let kitLoadPromise = null;
+
+function loadHorrorKit() {
+  if (kitLoadPromise) return kitLoadPromise;
+  kitLoadPromise = loadGLTF('models/horror_kit.glb').then(gltf => {
+    const seen = new Set();
+    gltf.scene.traverse(o => {
+      if (!o.name) return;
+      // Strip Blender's ".NNN" duplicate-name suffix ("Wall_02.037" -> "Wall_02")
+      const canonical = o.name.replace(/\.\d+$/, '');
+      if (seen.has(canonical)) return;
+      // Only pick mesh-owning nodes (groups that contain real geometry)
+      let hasMesh = false;
+      o.traverse(c => { if (c.isMesh) hasMesh = true; });
+      if (!hasMesh) return;
+      kitPieces[canonical] = o;
+      seen.add(canonical);
+    });
+    console.log('[trapped] horror kit loaded:', Object.keys(kitPieces));
+    return kitPieces;
+  }).catch(err => {
+    console.warn('[trapped] horror kit load failed:', err);
+    return null;
+  });
+  return kitLoadPromise;
+}
+
+// Return a fresh clone of a kit piece, or null if the kit isn't loaded or the
+// piece name doesn't exist. Keeps shadows/materials intact.
+function kitPiece(name) {
+  const src = kitPieces[name];
+  if (!src) return null;
+  const clone = src.clone(true);
+  clone.traverse(o => {
+    if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false; }
+  });
+  return clone;
+}
+
+// Preload in the background so when a horror_hall level rolls, the kit is ready.
+loadHorrorKit();
 
 function monsterBodyBasic(color, height, transparent=false) {
   const g = new THREE.Group();
